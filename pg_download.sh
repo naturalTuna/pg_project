@@ -79,37 +79,78 @@ for e in m.get("requires", {}).get("extensions", []):
 PY
 }
 
-# ── PG 버전 목록 (python3 scraping) ──────────────────────────
+# ── PG 버전 — 지원 버전(메이저) 현황 표 + 직접 입력 ───────────
 step "다운로드 옵션 설정"
 div
 
-echo "  PostgreSQL 버전을 선택하세요:"
-mapfile -t _PG_LINES < <(python3 - <<PYEOF
-import urllib.request, re
-try:
-    html = urllib.request.urlopen("https://ftp.postgresql.org/pub/source/", timeout=10).read().decode()
-    vers = sorted(
-        set(re.findall(r'v(\d+\.\d+)/', html)),
-        key=lambda v: [int(x) for x in v.split('.')],
-        reverse=True
-    )[:12]
-    for v in vers: print(v)
-except:
-    for v in ["17.2","17.1","16.6","16.5","15.10","15.9","14.15","14.14"]:
-        print(v)
-PYEOF
-)
-
-for i in "${!_PG_LINES[@]}"; do
-    printf "    %2d)  %s\n" "$((i+1))" "${_PG_LINES[$i]}"
-done
+echo -e "  ${BOLD}PostgreSQL 지원 버전 현황${NC}"
 echo ""
-read -rp "  번호 선택 [1]: " _sel
-_sel="${_sel:-1}"
-PG_VERSION="${_PG_LINES[$((_sel-1))]}"
-[[ -z "${PG_VERSION}" ]] && error "잘못된 선택입니다."
+
+# PostgreSQL 공식 EOL 페이지에서 버전 정보 조회 (메이저 버전 단위)
+_PG_EOL_URL="https://endoflife.date/api/postgresql.json"
+_PG_JSON=""
+if command -v curl &>/dev/null; then
+    _PG_JSON=$(curl -sf --max-time 5 "${_PG_EOL_URL}" 2>/dev/null || true)
+elif command -v wget &>/dev/null; then
+    _PG_JSON=$(wget -qO- --timeout=5 "${_PG_EOL_URL}" 2>/dev/null || true)
+fi
+
+PG_VERSION_DEFAULT="17.10"  # fallback 기본값
+if [[ -n "${_PG_JSON}" ]]; then
+    # 표 출력(stdout) + 기본값을 마지막 줄에 출력 → mapfile로 분리
+    mapfile -t _PG_LINES < <(python3 - <<PYEOF
+import json
+from datetime import date
+
+data = json.loads('''${_PG_JSON}''')
+today = date.today()
+
+active = []
+for entry in data:
+    try:
+        if date.fromisoformat(entry.get('eol', '')) >= today:
+            active.append(entry)
+    except Exception:
+        pass
+active.sort(key=lambda e: int(e.get('cycle', '0')), reverse=True)
+
+print(f"  {'메이저':>4}  {'최신버전':<12}  {'지원 종료일':<12}")
+print(f"  {'----':>4}  {'--------':<12}  {'----------':<12}")
+for entry in active:
+    print(f"  {entry['cycle']:>4}  {entry['latest']:<12}  {entry['eol']:<12}")
+
+default = active[1]['latest'] if len(active) >= 2 else (active[0]['latest'] if active else "17.10")
+print(f"__DEFAULT__:{default}")
+PYEOF
+    )
+    # 마지막 줄에서 기본값 추출, 나머지는 화면 출력
+    for _line in "${_PG_LINES[@]}"; do
+        if [[ "${_line}" == __DEFAULT__:* ]]; then
+            PG_VERSION_DEFAULT="${_line#__DEFAULT__:}"
+        else
+            echo "${_line}"
+        fi
+    done
+else
+    echo "  (버전 정보 자동 조회 실패 — 아래는 참고용 정보입니다)"
+    echo ""
+    echo "    메이저   최신버전     지원 종료일"
+    echo "    ──────   ──────────   ────────────"
+    echo "      18     18.4         2030-11-08"
+    echo "      17     17.10        2029-11-08"
+    echo "      16     16.9         2028-11-09"
+    echo "      15     15.13        2027-11-11"
+fi
+
+echo ""
+div
+echo ""
+read -rp "  다운로드할 PostgreSQL 버전을 입력하세요 [${PG_VERSION_DEFAULT}]: " PG_VERSION
+PG_VERSION="${PG_VERSION:-${PG_VERSION_DEFAULT}}"
+[[ -z "${PG_VERSION}" ]] && error "버전을 입력해야 합니다."
 PG_MAJOR="${PG_VERSION%%.*}"
 info "선택된 버전: PostgreSQL ${PG_VERSION}  (major: ${PG_MAJOR})"
+
 
 # ── HA 여부 ──────────────────────────────────────────────────
 echo ""
@@ -187,10 +228,13 @@ step "1. 의존 패키지 다운로드"
 div
 
 # 기본 빌드 의존 패키지 목록
+# (pkgconf-pkg-config, ncurses-devel: readline-devel/systemd-devel 등의
+#  전이 의존성으로 빠지기 쉬워 명시적으로 추가)
 PKG_LIST=(
     gcc make readline-devel zlib-devel openssl-devel
     libicu-devel systemd-devel python3-devel tcl-devel
     perl-devel perl-ExtUtils-Embed libxml2-devel libxslt-devel
+    pkgconf-pkg-config ncurses-devel
     wget tar gzip bzip2
 )
 # manifest에서 추가된 패키지 병합
@@ -208,13 +252,18 @@ case "${DOWNLOAD_PKG,,}" in
         info "의존 패키지를 다운로드합니다..."
         info "다운로드 로그 → ${PKG_LOG}"
 
+        # --downloadonly 가 전체 의존성을 정상적으로 해석해서 받아온다.
+        # (이미 설치된 패키지가 있으면 안 받아지는 경우가 있어
+        #  --setopt=alwaysincludepkgs=1 로 강제 포함)
         sudo dnf install -y --downloadonly \
             --downloaddir="${PKG_TMP}" \
+            --setopt=alwaysincludepkgs=1 \
             "${PKG_LIST[@]}" >> "${PKG_LOG}" 2>&1 || true
 
+        # 보강 다운로드. 단, --alldeps 는 멀티립(i686) 패키지를 끌어오면서
+        # pkg-config/ncurses-devel 같은 전이 의존성이 빠지는 경우가 있어 제거.
         sudo dnf download -y \
             --resolve \
-            --alldeps \
             --downloaddir="${PKG_TMP}" \
             "${PKG_LIST[@]}" >> "${PKG_LOG}" 2>&1 || true
 
