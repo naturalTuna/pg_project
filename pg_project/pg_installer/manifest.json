@@ -1,0 +1,13 @@
+{
+  "module": "pg_installer",
+  "version": "1.0",
+  "description": "PostgreSQL 설치 스크립트 (single / HA)",
+  "entry": "postgresql_install.sh",
+  "requires": {
+    "rpm": [
+      "bc",
+      "glibc-langpack-ko"
+    ],
+    "extensions": []
+  }
+}
