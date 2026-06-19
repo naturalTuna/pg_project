@@ -1,0 +1,15 @@
+{
+  "module": "pg_mon",
+  "version": "1.0",
+  "description": "PostgreSQL 모니터링 툴 (pgmon)",
+  "entry": "pgmon.sh",
+  "requires": {
+    "rpm": [
+      "bc",
+      "sysstat"
+    ],
+    "extensions": [
+      "pg_stat_statements"
+    ]
+  }
+}
