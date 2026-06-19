@@ -334,6 +334,9 @@ if [[ "${INSTALL_MODE}" == "ha" ]]; then
             patroni[etcd3] \
             --dest "${PATRONI_TMP}" >> "${PKG_LOG}" 2>&1
         info "Patroni 패키지 다운로드 완료 → ${PATRONI_TMP}/"
+	tar -czf "${INSTALLER_DIR}/patroni_pkgs.tar.gz" \
+            -C "${INSTALLER_DIR}" patroni_pkgs
+        info "Patroni 패키지 압축 완료 → ${INSTALLER_DIR}/patroni_pkgs.tar.gz"
     fi
 fi
 
