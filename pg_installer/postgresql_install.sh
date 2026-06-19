@@ -1,4 +1,3 @@
-
 # ============================================================
 #  PostgreSQL Install Script v1.0
 #  - single 모드 : 로컬 서버에 PostgreSQL 설치
@@ -62,7 +61,23 @@ PG_MAJOR="${PG_VERSION%%.*}"
 
 ETCD_TARBALL=$(ls "${INSTALLER_DIR}"/etcd-v*-linux-amd64.tar.gz 2>/dev/null | head -1)
 PATRONI_PKGS="${INSTALLER_DIR}/patroni_pkgs.tar.gz"
+PATRONI_PKGS_DIR="${INSTALLER_DIR}/patroni_pkgs"
 PKG_TGZ="${INSTALLER_DIR}/PKG.tar.gz"
+PKG_DIR="${SCRIPT_DIR}/PKG"
+
+# pg_download.sh 가 patroni_pkgs/ 를 디렉토리 형태로 풀어놓은 경우 (압축을 안 한 경우)
+# patroni_pkgs.tar.gz 가 없으면 여기서 자동으로 압축해서 만들어 준다.
+if [[ ! -f "${PATRONI_PKGS}" ]] && [[ -d "${PATRONI_PKGS_DIR}" ]] && \
+   [[ -n "$(ls -A "${PATRONI_PKGS_DIR}" 2>/dev/null)" ]]; then
+    tar -czf "${PATRONI_PKGS}" -C "${INSTALLER_DIR}" "patroni_pkgs"
+fi
+
+# pg_download.sh 가 의존 rpm을 ${SCRIPT_DIR}/PKG/ 디렉토리 형태로 풀어놓은 경우
+# installer/PKG.tar.gz 가 없으면 여기서 자동으로 압축해서 만들어 준다.
+if [[ ! -f "${PKG_TGZ}" ]] && [[ -d "${PKG_DIR}" ]] && \
+   [[ -n "$(ls -A "${PKG_DIR}" 2>/dev/null)" ]]; then
+    tar -czf "${PKG_TGZ}" -C "${SCRIPT_DIR}" "PKG"
+fi
 
 HA_PKGS_AVAILABLE=false
 if [[ -n "${ETCD_TARBALL}" && -f "${PATRONI_PKGS}" ]]; then
