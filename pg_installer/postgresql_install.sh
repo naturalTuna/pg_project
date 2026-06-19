@@ -448,7 +448,8 @@ fn_install_pkg_local() {
         local TMP
         TMP=$(mktemp -d)
         tar -zxf "${PKG_TGZ}" -C "${TMP}" >> "${LOG_INSTALL}" 2>&1
-        sudo rpm -Uvh --force "${TMP}"/PKG/*.rpm >> "${LOG_INSTALL}" 2>&1 || true
+        #sudo rpm -Uvh --force "${TMP}"/PKG/*.rpm >> "${LOG_INSTALL}" 2>&1 || true
+	sudo dnf localinstall -y "${TMP}"/PKG/*.rpm >> "${LOG_INSTALL}" 2>&1 || true
         rm -rf "${TMP}"
         info "의존 패키지 설치 완료"
     else
