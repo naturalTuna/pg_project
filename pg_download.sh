@@ -56,7 +56,6 @@ if ! command -v wget &>/dev/null && ! command -v curl &>/dev/null; then
 fi
 
 # ── manifest.json 파싱 헬퍼 ──────────────────────────────────
-# 의존 python3 -c (jq 없어도 동작)
 fn_manifest_rpms() {
     local manifest="$1"
     python3 - "$manifest" <<'PY'
@@ -79,35 +78,73 @@ for e in m.get("requires", {}).get("extensions", []):
 PY
 }
 
-# ── PG 버전 목록 (python3 scraping) ──────────────────────────
+# ── PG 버전 — 지원 버전(메이저) 현황 표 + 직접 입력 ───────────
 step "다운로드 옵션 설정"
 div
 
-echo "  PostgreSQL 버전을 선택하세요:"
-mapfile -t _PG_LINES < <(python3 - <<PYEOF
-import urllib.request, re
-try:
-    html = urllib.request.urlopen("https://ftp.postgresql.org/pub/source/", timeout=10).read().decode()
-    vers = sorted(
-        set(re.findall(r'v(\d+\.\d+)/', html)),
-        key=lambda v: [int(x) for x in v.split('.')],
-        reverse=True
-    )[:12]
-    for v in vers: print(v)
-except:
-    for v in ["17.2","17.1","16.6","16.5","15.10","15.9","14.15","14.14"]:
-        print(v)
-PYEOF
-)
-
-for i in "${!_PG_LINES[@]}"; do
-    printf "    %2d)  %s\n" "$((i+1))" "${_PG_LINES[$i]}"
-done
+echo -e "  ${BOLD}PostgreSQL 지원 버전 현황${NC}"
 echo ""
-read -rp "  번호 선택 [1]: " _sel
-_sel="${_sel:-1}"
-PG_VERSION="${_PG_LINES[$((_sel-1))]}"
-[[ -z "${PG_VERSION}" ]] && error "잘못된 선택입니다."
+
+# PostgreSQL 공식 EOL 페이지에서 버전 정보 조회 (메이저 버전 단위)
+_PG_EOL_URL="https://endoflife.date/api/postgresql.json"
+_PG_JSON=""
+if command -v curl &>/dev/null; then
+    _PG_JSON=$(curl -sf --max-time 5 "${_PG_EOL_URL}" 2>/dev/null || true)
+elif command -v wget &>/dev/null; then
+    _PG_JSON=$(wget -qO- --timeout=5 "${_PG_EOL_URL}" 2>/dev/null || true)
+fi
+
+PG_VERSION_DEFAULT="17.10"  # fallback 기본값
+if [[ -n "${_PG_JSON}" ]]; then
+    mapfile -t _PG_LINES < <(python3 - <<PYEOF
+import json
+from datetime import date
+
+data = json.loads('''${_PG_JSON}''')
+today = date.today()
+
+active = []
+for entry in data:
+    try:
+        if date.fromisoformat(entry.get('eol', '')) >= today:
+            active.append(entry)
+    except Exception:
+        pass
+active.sort(key=lambda e: int(e.get('cycle', '0')), reverse=True)
+
+print(f"  {'메이저':>4}  {'최신버전':<12}  {'지원 종료일':<12}")
+print(f"  {'----':>4}  {'--------':<12}  {'----------':<12}")
+for entry in active:
+    print(f"  {entry['cycle']:>4}  {entry['latest']:<12}  {entry['eol']:<12}")
+
+default = active[1]['latest'] if len(active) >= 2 else (active[0]['latest'] if active else "17.10")
+print(f"__DEFAULT__:{default}")
+PYEOF
+    )
+    for _line in "${_PG_LINES[@]}"; do
+        if [[ "${_line}" == __DEFAULT__:* ]]; then
+            PG_VERSION_DEFAULT="${_line#__DEFAULT__:}"
+        else
+            echo "${_line}"
+        fi
+    done
+else
+    echo "  (버전 정보 자동 조회 실패 — 아래는 참고용 정보입니다)"
+    echo ""
+    echo "    메이저   최신버전     지원 종료일"
+    echo "    ──────   ──────────   ────────────"
+    echo "      18     18.4         2030-11-08"
+    echo "      17     17.10        2029-11-08"
+    echo "      16     16.9         2028-11-09"
+    echo "      15     15.13        2027-11-11"
+fi
+
+echo ""
+div
+echo ""
+read -rp "  다운로드할 PostgreSQL 버전을 입력하세요 [${PG_VERSION_DEFAULT}]: " PG_VERSION
+PG_VERSION="${PG_VERSION:-${PG_VERSION_DEFAULT}}"
+[[ -z "${PG_VERSION}" ]] && error "버전을 입력해야 합니다."
 PG_MAJOR="${PG_VERSION%%.*}"
 info "선택된 버전: PostgreSQL ${PG_VERSION}  (major: ${PG_MAJOR})"
 
@@ -152,16 +189,14 @@ PKG_LOG="${WORK_DIR}/PKG_download.log"
 step "manifest에서 패키지 목록 수집"
 div
 
-declare -A _RPM_MAP   # 중복 제거용
+declare -A _RPM_MAP
 declare -A _EXT_MAP
 
-# installer 모듈
 while IFS= read -r pkg; do
     [[ -n "$pkg" ]] && _RPM_MAP["$pkg"]=1
 done < <(fn_manifest_rpms "${MODULE_INSTALLER}/manifest.json")
 info "pg_installer 요구 패키지: $(fn_manifest_rpms "${MODULE_INSTALLER}/manifest.json" | tr '\n' ' ')"
 
-# pg_mon 모듈
 if [[ "${DOWNLOAD_MON,,}" =~ ^(y|yes)$ ]] && [[ -f "${MODULE_MON}/manifest.json" ]]; then
     while IFS= read -r pkg; do
         [[ -n "$pkg" ]] && _RPM_MAP["$pkg"]=1
@@ -174,26 +209,25 @@ if [[ "${DOWNLOAD_MON,,}" =~ ^(y|yes)$ ]] && [[ -f "${MODULE_MON}/manifest.json"
     info "pg_mon 요구 extension: $(fn_manifest_exts "${MODULE_MON}/manifest.json" | tr '\n' ' ')"
 fi
 
-# installer 모듈 extensions
 while IFS= read -r ext; do
     [[ -n "$ext" ]] && _EXT_MAP["$ext"]=1
 done < <(fn_manifest_exts "${MODULE_INSTALLER}/manifest.json")
 
 # ============================================================
 #  1. 의존 패키지 다운로드 (dnf)
-#     manifest에서 수집된 rpm + 기본 빌드 의존성
 # ============================================================
 step "1. 의존 패키지 다운로드"
 div
 
-# 기본 빌드 의존 패키지 목록
+# (pkgconf-pkg-config, ncurses-devel: readline-devel/systemd-devel 등의
+#  전이 의존성으로 빠지기 쉬워 명시적으로 추가)
 PKG_LIST=(
     gcc make readline-devel zlib-devel openssl-devel
     libicu-devel systemd-devel python3-devel tcl-devel
     perl-devel perl-ExtUtils-Embed libxml2-devel libxslt-devel
+    pkgconf-pkg-config ncurses-devel
     wget tar gzip bzip2
 )
-# manifest에서 추가된 패키지 병합
 for pkg in "${!_RPM_MAP[@]}"; do
     PKG_LIST+=("$pkg")
 done
@@ -208,11 +242,15 @@ case "${DOWNLOAD_PKG,,}" in
         info "의존 패키지를 다운로드합니다..."
         info "다운로드 로그 → ${PKG_LOG}"
 
+        # --arch x86_64: i686(32비트) rpm 제외
+        # --setopt=alwaysincludepkgs=1: 이미 설치된 패키지도 강제 포함
         sudo dnf install -y --downloadonly \
             --downloaddir="${PKG_TMP}" \
             --arch x86_64 \
+            --setopt=alwaysincludepkgs=1 \
             "${PKG_LIST[@]}" >> "${PKG_LOG}" 2>&1 || true
 
+        # 보강 다운로드 (--alldeps 제거: i686 끌어오는 부작용 있음)
         sudo dnf download -y \
             --resolve \
             --arch x86_64 \
@@ -286,12 +324,14 @@ if [[ "${INSTALL_MODE}" == "ha" ]]; then
             patroni[etcd3] \
             --dest "${PATRONI_TMP}" >> "${PKG_LOG}" 2>&1
         info "Patroni 패키지 다운로드 완료 → ${PATRONI_TMP}/"
+        tar -czf "${INSTALLER_DIR}/patroni_pkgs.tar.gz" \
+            -C "${INSTALLER_DIR}" patroni_pkgs
+        info "Patroni 패키지 압축 완료 → ${INSTALLER_DIR}/patroni_pkgs.tar.gz"
     fi
 fi
 
 # ============================================================
 #  4. pg_mon 모듈 복사
-#     (구버전: base64 디코딩 → 신버전: 디렉토리 직접 복사)
 # ============================================================
 step "4. pg_mon 패키징"
 div
@@ -304,20 +344,16 @@ case "${DOWNLOAD_MON,,}" in
         mkdir -p "${MON_PGMON_DIR}"
         info "pg_mon/ 복사 중 → ${MON_PGMON_DIR}/"
         cp -r "${MODULE_MON}/." "${MON_PGMON_DIR}/"
-        # manifest.json은 배포본에 포함하지 않음 (빌드 메타데이터)
         rm -f "${MON_PGMON_DIR}/manifest.json"
 
-        chmod +x "${MON_PGMON_DIR}/pgmon.sh"            2>/dev/null || true
-        chmod +x "${MON_PGMON_DIR}/collector/collect.sh" 2>/dev/null || true
-        chmod +x "${MON_PGMON_DIR}/lib/"*.sh             2>/dev/null || true
+        chmod +x "${MON_PGMON_DIR}/pgmon.sh"             2>/dev/null || true
+        chmod +x "${MON_PGMON_DIR}/collector/collect.sh"  2>/dev/null || true
+        chmod +x "${MON_PGMON_DIR}/lib/"*.sh              2>/dev/null || true
 
-        # extension rpm이 필요한 경우 extensions/ 디렉토리에 별도 저장
         if [[ ${#_EXT_MAP[@]} -gt 0 ]]; then
             EXT_DIR="${MON_DIR}/extensions"
             mkdir -p "${EXT_DIR}"
             info "extension rpm 다운로드 필요 목록: ${!_EXT_MAP[*]}"
-            # contrib extension은 소스 빌드 시 자동 설치되므로 스킵
-            # non-contrib extension은 여기서 dnf download
         fi
 
         cat > "${MON_DIR}/MONITORING_README.txt" << 'MONEOF'
@@ -352,7 +388,6 @@ esac
 
 # ============================================================
 #  5. pg_installer 복사
-#     (구버전: heredoc으로 파일 생성 → 신버전: 파일 직접 복사)
 # ============================================================
 step "5. pg_installer 패키징"
 div
