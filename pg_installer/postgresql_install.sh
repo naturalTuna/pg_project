@@ -491,6 +491,7 @@ fn_create_dirs_local() {
     # Archive/Backup을 모두 사용하지 않으면(=n) 임의 경로(/pgbackup 등)를
     # 권한 없이 생성 시도하지 않도록 생략한다. 필요 시 사용자가 직접 생성.
     [[ -n "${DUMP_PATH}" ]] && mkdir -p "${DUMP_PATH}"
+    return 0
 }
 
 # ── sudo 권한 확인 함수 (원격) ───────────────────────────────
