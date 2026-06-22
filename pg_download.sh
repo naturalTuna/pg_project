@@ -18,6 +18,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MODULE_INSTALLER="${SCRIPT_DIR}/pg_installer"
 MODULE_MON="${SCRIPT_DIR}/pg_mon"
 MODULE_EXT="${SCRIPT_DIR}/extensions"
+EXT_CATALOG="${MODULE_EXT}/manifest.json"
 
 # ── 출력 경로 ────────────────────────────────────────────────
 WORK_DIR="postgresql"
@@ -67,14 +68,25 @@ for r in m.get("requires", {}).get("rpm", []):
 PY
 }
 
-fn_manifest_exts() {
-    local manifest="$1"
-    python3 - "$manifest" <<'PY'
+# extensions/manifest.json (카탈로그) 파서.
+#   source == "git" 인 항목만 "이름|repo|git_ref|build" 형태로 출력한다.
+#   contrib(내장)이나 기타 source 는 다운로드 대상이 아니므로 제외.
+fn_catalog_git_exts() {
+    local catalog="$1"
+    python3 - "$catalog" <<'PY'
 import sys, json
 with open(sys.argv[1]) as f:
     m = json.load(f)
-for e in m.get("requires", {}).get("extensions", []):
-    print(e)
+for name, meta in m.get("extensions", {}).items():
+    if meta.get("source") != "git":
+        continue
+    repo = meta.get("repo", "")
+    ref  = meta.get("git_ref", "")
+    build = meta.get("build", "pgxs")
+    if not repo or not ref:
+        sys.stderr.write(f"[catalog] {name}: repo/git_ref 누락 — 건너뜀\n")
+        continue
+    print(f"{name}|{repo}|{ref}|{build}")
 PY
 }
 
@@ -190,7 +202,6 @@ step "manifest에서 패키지 목록 수집"
 div
 
 declare -A _RPM_MAP
-declare -A _EXT_MAP
 
 while IFS= read -r pkg; do
     [[ -n "$pkg" ]] && _RPM_MAP["$pkg"]=1
@@ -202,16 +213,7 @@ if [[ "${DOWNLOAD_MON,,}" =~ ^(y|yes)$ ]] && [[ -f "${MODULE_MON}/manifest.json"
         [[ -n "$pkg" ]] && _RPM_MAP["$pkg"]=1
     done < <(fn_manifest_rpms "${MODULE_MON}/manifest.json")
     info "pg_mon 요구 패키지: $(fn_manifest_rpms "${MODULE_MON}/manifest.json" | tr '\n' ' ')"
-
-    while IFS= read -r ext; do
-        [[ -n "$ext" ]] && _EXT_MAP["$ext"]=1
-    done < <(fn_manifest_exts "${MODULE_MON}/manifest.json")
-    info "pg_mon 요구 extension: $(fn_manifest_exts "${MODULE_MON}/manifest.json" | tr '\n' ' ')"
 fi
-
-while IFS= read -r ext; do
-    [[ -n "$ext" ]] && _EXT_MAP["$ext"]=1
-done < <(fn_manifest_exts "${MODULE_INSTALLER}/manifest.json")
 
 # ============================================================
 #  1. 의존 패키지 다운로드 (dnf)
@@ -219,21 +221,19 @@ done < <(fn_manifest_exts "${MODULE_INSTALLER}/manifest.json")
 step "1. 의존 패키지 다운로드"
 div
 
-# (pkgconf-pkg-config, ncurses-devel: readline-devel/systemd-devel 등의
-#  전이 의존성으로 빠지기 쉬워 명시적으로 추가)
-PKG_LIST=(
-    gcc make readline-devel zlib-devel openssl-devel
-    libicu-devel systemd-devel python3-devel tcl-devel
-    perl-devel perl-ExtUtils-Embed libxml2-devel libxslt-devel
-    pkgconf-pkg-config ncurses-devel
-    wget tar gzip bzip2
-)
+# 다운로드할 rpm 목록은 manifest.json(requires.rpm)에서만 수집한다.
+PKG_LIST=()
 for pkg in "${!_RPM_MAP[@]}"; do
     PKG_LIST+=("$pkg")
 done
 
 read -rp "  의존 패키지를 다운로드 하시겠습니까? [Y/n]: " DOWNLOAD_PKG
 DOWNLOAD_PKG="${DOWNLOAD_PKG:-y}"
+
+if [[ ${#PKG_LIST[@]} -eq 0 ]]; then
+    warn "manifest.json 에 requires.rpm 항목이 없습니다. 패키지 다운로드를 건너뜁니다."
+    DOWNLOAD_PKG="n"
+fi
 
 case "${DOWNLOAD_PKG,,}" in
     y|yes)
@@ -286,6 +286,61 @@ else
         curl -L --progress-bar -o "${PG_DEST}" "${PG_URL}"
     fi
     info "PostgreSQL 소스 다운로드 완료 → ${PG_DEST}"
+fi
+
+# ============================================================
+#  2-1. Extension 소스 다운로드 (git 태그 tarball)
+#       카탈로그(extensions/manifest.json)의 source=git 항목을
+#       GitHub 태그 tarball 로 받아 패키징한다.
+#       설치 서버에서 tar 풀고 make && make install (PGXS).
+# ============================================================
+if [[ -f "${EXT_CATALOG}" ]]; then
+    step "2-1. Extension 소스 다운로드 (git tarball)"
+    div
+
+    EXT_SRC_DIR="${INSTALLER_DIR}/extensions"
+    mkdir -p "${EXT_SRC_DIR}"
+
+    # 설치 서버가 참조할 수 있도록 카탈로그도 함께 복사
+    cp "${EXT_CATALOG}" "${EXT_SRC_DIR}/manifest.json"
+
+    _ext_count=0
+    _ext_fail=0
+    while IFS='|' read -r _ext_name _ext_repo _ext_ref _ext_build; do
+        [[ -z "${_ext_name}" ]] && continue
+
+        _ext_tarball="${_ext_name}-${_ext_ref}.tar.gz"
+        _ext_dest="${EXT_SRC_DIR}/${_ext_tarball}"
+        _ext_url="https://github.com/${_ext_repo}/archive/refs/tags/${_ext_ref}.tar.gz"
+
+        if [[ -f "${_ext_dest}" ]]; then
+            info "${_ext_name} (${_ext_ref}) 이미 존재 (스킵)"
+            _ext_count=$((_ext_count + 1))
+            continue
+        fi
+
+        info "${_ext_name} (${_ext_ref}) 다운로드 중... [${_ext_repo}]"
+        if command -v wget &>/dev/null; then
+            _dl_ok=$(wget -q -O "${_ext_dest}" "${_ext_url}" && echo ok || echo fail)
+        else
+            _dl_ok=$(curl -fsSL -o "${_ext_dest}" "${_ext_url}" && echo ok || echo fail)
+        fi
+
+        # 받은 파일이 정상 gzip tarball 인지 검증 (404 HTML 등 거르기)
+        if [[ "${_dl_ok}" == "ok" ]] && tar -tzf "${_ext_dest}" &>/dev/null; then
+            info "  → ${_ext_dest} (build=${_ext_build})"
+            _ext_count=$((_ext_count + 1))
+        else
+            warn "  ${_ext_name} 다운로드 실패 — 태그(${_ext_ref})/repo(${_ext_repo}) 확인 필요"
+            rm -f "${_ext_dest}"
+            _ext_fail=$((_ext_fail + 1))
+        fi
+    done < <(fn_catalog_git_exts "${EXT_CATALOG}")
+
+    info "extension 소스 ${_ext_count}개 패키징 완료 → ${EXT_SRC_DIR}/"
+    [[ ${_ext_fail} -gt 0 ]] && warn "실패 ${_ext_fail}개 — 위 로그 확인"
+else
+    warn "extension 카탈로그가 없습니다 (${EXT_CATALOG}). extension 다운로드를 건너뜁니다."
 fi
 
 # ============================================================
@@ -349,12 +404,6 @@ case "${DOWNLOAD_MON,,}" in
         chmod +x "${MON_PGMON_DIR}/pgmon.sh"             2>/dev/null || true
         chmod +x "${MON_PGMON_DIR}/collector/collect.sh"  2>/dev/null || true
         chmod +x "${MON_PGMON_DIR}/lib/"*.sh              2>/dev/null || true
-
-        if [[ ${#_EXT_MAP[@]} -gt 0 ]]; then
-            EXT_DIR="${MON_DIR}/extensions"
-            mkdir -p "${EXT_DIR}"
-            info "extension rpm 다운로드 필요 목록: ${!_EXT_MAP[*]}"
-        fi
 
         cat > "${MON_DIR}/MONITORING_README.txt" << 'MONEOF'
 ================================================================
