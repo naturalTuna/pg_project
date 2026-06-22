@@ -523,6 +523,7 @@ export LD_LIBRARY_PATH=\${PGHOME}/lib:\${LD_LIBRARY_PATH}
 export PGDATA=${DATA_PATH}
 export PGPORT=${PG_PORT}
 export PGUSER=postgres
+export PGDATABASE=postgres
 
 # ── 편의 alias ─────────────────────────────────────────────
 alias pgbin='cd \${PGHOME}/bin'
@@ -958,6 +959,15 @@ EOF
         "${ENGINE_PATH}/bin/pg_ctl" -D "${DATA_PATH}" reload
         info "pg_hba.conf replication 규칙 추가 및 reload 완료"
     fi
+
+    # ── postgres 스키마 생성 + search_path = postgres, public ──
+    info "postgres 스키마 생성 및 search_path 설정 중..."
+    "${ENGINE_PATH}/bin/psql" -p "${PG_PORT}" -d postgres -U postgres <<'PGSCHEMA' >> "${LOG_INSTALL}" 2>&1
+CREATE SCHEMA IF NOT EXISTS postgres AUTHORIZATION postgres;
+ALTER ROLE postgres SET search_path = postgres, public;
+ALTER DATABASE postgres SET search_path = postgres, public;
+PGSCHEMA
+    info "postgres 스키마/search_path 설정 완료 (재접속 시 적용)"
 
 fi  # end single
 
@@ -1574,6 +1584,18 @@ if [[ -f /tmp/postgresql.conf.patroni ]]; then
 fi
 PAPPLY_CONF
     info "[Primary] postgresql.conf 적용 완료"
+
+    # ── postgres 스키마 생성 + search_path (Primary 1회) ──
+    #   Standby 는 Patroni 가 pg_basebackup 으로 클론하므로 자동 복제됨
+    info "[Primary] postgres 스키마/search_path 설정 중..."
+    ssh ${SSH_OPTS} "${HA_PRIMARY_HOST}" \
+        "${ENGINE_PATH}/bin/psql -p ${PG_PORT} -U postgres -d postgres \
+         -c \"CREATE SCHEMA IF NOT EXISTS postgres AUTHORIZATION postgres;\" \
+         -c \"ALTER ROLE postgres SET search_path = postgres, public;\" \
+         -c \"ALTER DATABASE postgres SET search_path = postgres, public;\"" \
+        >> "${HA_LOG}" 2>&1 \
+        && info "[Primary] postgres 스키마/search_path 설정 완료" \
+        || warn "[Primary] 스키마 설정 실패 (수동 확인 필요)"
 
     # ── 5-3. Standby Patroni 설치 ────────────────────────────
     info "[Standby] Patroni 설치 중..."
