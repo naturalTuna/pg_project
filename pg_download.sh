@@ -242,23 +242,50 @@ case "${DOWNLOAD_PKG,,}" in
         info "의존 패키지를 다운로드합니다..."
         info "다운로드 로그 → ${PKG_LOG}"
 
-        # --arch x86_64: i686(32비트) rpm 제외
-        # --setopt=alwaysincludepkgs=1: 이미 설치된 패키지도 강제 포함
+        # CRB(CodeReady Builder) 저장소 감지.
+        #   perl-ExtUtils-Embed 등 일부 -devel 패키지는 CRB 에만 있다.
+        #   Rocky/Alma 9 = crb, EL8 = powertools. 존재하는 repo id 를 찾아 활성화.
+        _CRB_REPO=""
+        for _r in crb powertools; do
+            if dnf repolist --all 2>/dev/null | grep -qiE "^${_r}\b"; then
+                _CRB_REPO="${_r}"
+                break
+            fi
+        done
+        _ENABLE_OPT=()
+        if [[ -n "${_CRB_REPO}" ]]; then
+            _ENABLE_OPT=(--enablerepo="${_CRB_REPO}")
+            info "CRB 저장소 활성화: ${_CRB_REPO}"
+        else
+            warn "CRB/PowerTools 저장소를 찾지 못했습니다. perl-ExtUtils-Embed 등이 누락될 수 있습니다."
+        fi
+
+        # 1차: install --downloadonly 로 의존성까지 모두 다운로드
+        #   - dnf install 은 --arch 를 지원하지 않으므로 -x '*.i686' 로 32비트 제외
+        #   - --skip-broken: 일부 패키지를 못 찾아도 멈추지 않고 나머지 진행
         sudo dnf install -y --downloadonly \
             --downloaddir="${PKG_TMP}" \
-            --arch x86_64 \
-            --setopt=alwaysincludepkgs=1 \
+            --skip-broken \
+            "${_ENABLE_OPT[@]}" \
+            -x '*.i686' \
             "${PKG_LIST[@]}" >> "${PKG_LOG}" 2>&1 || true
 
-        # 보강 다운로드 (--alldeps 제거: i686 끌어오는 부작용 있음)
+        # 2차 보강: download --resolve 로 누락분 보충
+        #   - dnf download 는 --arch 지원
+        #   - --skip-broken: 저장소에 없는 패키지가 있어도 계속
         sudo dnf download -y \
             --resolve \
             --arch x86_64 \
+            --skip-broken \
+            "${_ENABLE_OPT[@]}" \
             --downloaddir="${PKG_TMP}" \
             "${PKG_LIST[@]}" >> "${PKG_LOG}" 2>&1 || true
 
         _pkg_count=$(find "${PKG_TMP}" -name "*.rpm" 2>/dev/null | wc -l)
         info "rpm 파일 ${_pkg_count}개 다운로드 완료 → ${PKG_TMP}/"
+        if [[ ${_pkg_count} -eq 0 ]]; then
+            warn "rpm 0개 — 저장소 접근 실패 또는 패키지명 오류 가능. ${PKG_LOG} 확인"
+        fi
         ;;
     n|no)
         warn "패키지 다운로드를 건너뜁니다."
