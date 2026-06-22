@@ -18,6 +18,7 @@
       "tcl-devel",
       "perl-devel",
       "perl-ExtUtils-Embed",
+      "perl-core",
       "libxml2-devel",
       "libxslt-devel",
       "pkgconf-pkg-config",
