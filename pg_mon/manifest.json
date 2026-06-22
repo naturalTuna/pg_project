@@ -7,9 +7,7 @@
     "rpm": [
       "bc",
       "sysstat"
-    ],
-    "extensions": [
-      "pg_stat_statements"
     ]
   }
 }
+
