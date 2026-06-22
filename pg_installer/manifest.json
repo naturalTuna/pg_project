@@ -5,9 +5,27 @@
   "entry": "postgresql_install.sh",
   "requires": {
     "rpm": [
+      "gcc",
+      "make",
+      "readline-devel",
+      "zlib-devel",
+      "openssl-devel",
+      "libicu-devel",
+      "systemd-devel",
+      "python3-devel",
+      "tcl-devel",
+      "perl-devel",
+      "perl-ExtUtils-Embed",
+      "libxml2-devel",
+      "libxslt-devel",
+      "pkgconf-pkg-config",
+      "ncurses-devel",
+      "wget",
+      "tar",
+      "gzip",
+      "bzip2",
       "bc",
       "glibc-langpack-ko"
-    ],
-    "extensions": []
+    ]
   }
 }
