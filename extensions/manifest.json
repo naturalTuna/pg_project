@@ -1,27 +1,98 @@
 {
-  "version": "1.0",
-  "description": "지원 extension 카탈로그. pg_download.sh가 이 목록을 참조해 rpm을 다운로드합니다.",
+  "version": "2.0",
+  "description": "지원 extension 카탈로그. source=git 인 항목만 pg_download.sh가 GitHub 태그 tarball 로 받아 패키징한다. source=contrib(PG 내장) / disabled(보류) 는 다운로드하지 않는다. 받으려면 해당 항목의 source 를 git 으로 바꾼다.",
+  "_source_values": {
+    "git": "GitHub 태그 tarball 다운로드 대상. repo + git_ref 필수.",
+    "contrib": "PostgreSQL 소스(contrib)에 포함. 별도 다운로드 불필요.",
+    "disabled": "카탈로그 등재만. 다운로드 보류. git 으로 바꾸면 활성화."
+  },
   "extensions": {
     "pg_stat_statements": {
-      "description": "쿼리 실행 통계 수집 (PostgreSQL contrib 내장)",
-      "rpm_pattern": null,
-      "contrib": true,
-      "note": "postgresql-contrib 패키지에 포함"
+      "description": "쿼리 실행 통계 수집",
+      "source": "contrib",
+      "used_by": ["pgmon", "pg_tune"],
+      "note": "PG contrib 내장"
+    },
+    "auto_explain": {
+      "description": "느린 쿼리 실행계획 자동 로깅",
+      "source": "contrib",
+      "used_by": ["pgmon", "pg_tune"],
+      "note": "PG contrib 내장"
+    },
+    "pg_buffercache": {
+      "description": "shared_buffers 점유 현황 조회",
+      "source": "contrib",
+      "used_by": ["pgmon"],
+      "note": "PG contrib 내장"
+    },
+    "pgstattuple": {
+      "description": "테이블/인덱스 블록 단위 dead tuple, bloat 통계",
+      "source": "contrib",
+      "used_by": ["pgmon"],
+      "note": "PG contrib 내장"
+    },
+    "pg_wait_sampling": {
+      "description": "wait event 샘플링 통계 (pgmon 대기 이벤트 수집용)",
+      "source": "disabled",
+      "repo": "postgrespro/pg_wait_sampling",
+      "git_ref": "",
+      "build": "pgxs",
+      "used_by": ["pgmon"],
+      "note": "받으려면 git_ref 에 릴리스 태그 채우고 source 를 git 으로. shared_preload_libraries 등록 필요."
+    },
+    "pg_stat_kcache": {
+      "description": "OS 레벨(physical I/O, CPU) 쿼리별 통계",
+      "source": "disabled",
+      "repo": "powa-team/pg_stat_kcache",
+      "git_ref": "",
+      "build": "pgxs",
+      "used_by": ["pgmon"],
+      "note": "pg_stat_statements 의존. shared_preload_libraries 등록 필요."
+    },
+    "hypopg": {
+      "description": "가상(hypothetical) 인덱스 — pg_tune verifier 가상 인덱스 검증",
+      "source": "disabled",
+      "repo": "HypoPG/hypopg",
+      "git_ref": "",
+      "build": "pgxs",
+      "used_by": ["pg_tune"],
+      "note": "받으려면 git_ref(예: 1.4.1, v 접두사 없음) 채우고 source 를 git 으로."
+    },
+    "pg_qualstats": {
+      "description": "WHERE 절 술어(predicate) 선택도 통계 — pg_tune 인덱스 후보 도출",
+      "source": "disabled",
+      "repo": "powa-team/pg_qualstats",
+      "git_ref": "",
+      "build": "pgxs",
+      "used_by": ["pg_tune"],
+      "note": "shared_preload_libraries 등록 필요."
     },
     "pgaudit": {
       "description": "감사(audit) 로그",
-      "rpm_pattern": "pgaudit*${PG_MAJOR}*",
-      "contrib": false
+      "source": "disabled",
+      "repo": "pgaudit/pgaudit",
+      "git_ref": "",
+      "build": "pgxs",
+      "used_by": [],
+      "note": "git_ref 가 PG 메이저와 맞물림(예: PG18 -> 18.x 브랜치 태그)."
     },
     "pg_stat_monitor": {
       "description": "확장 쿼리 통계 수집",
-      "rpm_pattern": "pg_stat_monitor_${PG_MAJOR}*",
-      "contrib": false
+      "source": "disabled",
+      "repo": "percona/pg_stat_monitor",
+      "git_ref": "",
+      "build": "pgxs",
+      "used_by": [],
+      "note": ""
     },
     "pg_cron": {
       "description": "DB 내부 크론 스케줄러",
-      "rpm_pattern": "pg_cron_${PG_MAJOR}*",
-      "contrib": false
+      "source": "disabled",
+      "repo": "citusdata/pg_cron",
+      "git_ref": "v1.6.4",
+      "build": "pgxs",
+      "used_by": [],
+      "note": "받으려면 source 를 git 으로. shared_preload_libraries 등록 필요."
     }
   }
 }
