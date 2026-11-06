@@ -45,7 +45,7 @@
       "description": "wait event 샘플링 통계 (pgmon 대기 이벤트 수집용)",
       "source": "disabled",
       "repo": "postgrespro/pg_wait_sampling",
-      "git_ref": "",
+      "git_ref": "auto",
       "build": "pgxs",
       "used_by": [
         "pgmon"
@@ -56,7 +56,7 @@
       "description": "OS 레벨(physical I/O, CPU) 쿼리별 통계",
       "source": "disabled",
       "repo": "powa-team/pg_stat_kcache",
-      "git_ref": "",
+      "git_ref": "auto",
       "build": "pgxs",
       "used_by": [
         "pgmon"
@@ -67,18 +67,18 @@
       "description": "가상(hypothetical) 인덱스 — pg_tune_ai verifier 가상 인덱스 검증",
       "source": "git",
       "repo": "HypoPG/hypopg",
-      "git_ref": "1.4.1",
+      "git_ref": "auto",
       "build": "pgxs",
       "used_by": [
         "pg_tune_ai"
       ],
-      "note": "pg_tune_ai verify/tune 필수. 1.4.1 = PG 16 빌드 확인. PG18 은 상위 릴리스 태그로 교체 필요할 수 있음."
+      "note": "pg_tune_ai verify/tune 필수. git_ref=auto (최신 정식 릴리스). --verify 로 해당 PG 버전 빌드 확인 가능."
     },
     "pgvector": {
       "description": "벡터 타입 / 유사도 검색 (HNSW, IVFFlat 인덱스)",
       "source": "git",
       "repo": "pgvector/pgvector",
-      "git_ref": "v0.8.7",
+      "git_ref": "auto",
       "build": "pgxs",
       "make_args": "OPTFLAGS=",
       "used_by": [],
@@ -88,7 +88,7 @@
       "description": "WHERE 절 술어(predicate) 선택도 통계 — pg_tune_ai 인덱스 후보 도출",
       "source": "disabled",
       "repo": "powa-team/pg_qualstats",
-      "git_ref": "",
+      "git_ref": "auto",
       "build": "pgxs",
       "used_by": [
         "pg_tune_ai"
@@ -99,16 +99,17 @@
       "description": "감사(audit) 로그",
       "source": "disabled",
       "repo": "pgaudit/pgaudit",
-      "git_ref": "",
+      "git_ref": "auto",
       "build": "pgxs",
       "used_by": [],
-      "note": "git_ref 가 PG 메이저와 맞물림(예: PG18 -> 18.x 브랜치 태그)."
+      "note": "PG 메이저별 태그(17.x, 18.x)를 ref_pattern 으로 자동 선택. 쓰려면 source 를 git 으로. shared_preload_libraries 등록 필요.",
+      "ref_pattern": "^{major}\\."
     },
     "pg_stat_monitor": {
       "description": "확장 쿼리 통계 수집",
       "source": "disabled",
       "repo": "percona/pg_stat_monitor",
-      "git_ref": "",
+      "git_ref": "auto",
       "build": "pgxs",
       "used_by": [],
       "note": ""
@@ -123,5 +124,6 @@
       "note": "받으려면 source 를 git 으로. shared_preload_libraries 등록 필요."
     }
   },
-  "_make_args": "(선택) 항목별 \"make_args\": PGXS make 에 추가로 넘길 인자. 예) pgvector 의 OPTFLAGS= (CPU 전용 최적화 끄기)"
+  "_make_args": "(선택) 항목별 \"make_args\": PGXS make 에 추가로 넘길 인자. 예) pgvector 의 OPTFLAGS= (CPU 전용 최적화 끄기)",
+  "_git_ref": "git_ref: 태그를 직접 적으면 고정(pin). \"auto\" 면 pg_download.sh 가 저장소 태그 중 최신 정식 릴리스를 고른다 (rc/beta 제외). ref_pattern 이 있으면 그 패턴에 맞는 태그만 후보 ({major} = 선택한 PG 메이저, 예: pgaudit \"^{major}\\\\.\")."
 }

@@ -43,10 +43,13 @@ pg_project/
 postgresql/
 ├── postgresql_install.sh
 ├── install.conf.sample         ← 무인 설치 응답 파일 샘플
+├── BUILD_LOCK.txt              ← 이번 다운로드 구성 기록 (--lock 으로 재현)
+├── VERIFY_REPORT.txt / VERIFY.log   (--verify 시)
 ├── PKG/                        ← 의존 rpm (dnf download 결과)
 ├── PKG_download.log
 ├── installer/
 │   ├── postgresql-<버전>.tar.gz
+│   ├── build_features.txt      ← 이 PG 버전에서 쓸 configure 옵션 (자동 판단)
 │   ├── extensions/             ← source=git extension tarball + 카탈로그
 │   ├── etcd-v<버전>-linux-amd64.tar.gz   (ha 선택 시)
 │   └── patroni_pkgs.tar.gz              (ha 선택 시)
@@ -65,7 +68,9 @@ postgresql/
 필요 도구: `tar`, `python3`, `wget` 또는 `curl`, `dnf`(sudo 권한)
 
 ```bash
-bash pg_download.sh
+bash pg_download.sh                          # 기본
+bash pg_download.sh --verify                 # + 이 서버에서 시험 빌드로 검증 (아래 참고)
+bash pg_download.sh --lock BUILD_LOCK.txt    # 이전과 같은 구성으로 다시 받기
 ```
 
 대화형으로 아래를 묻습니다.
@@ -77,6 +82,44 @@ bash pg_download.sh
 | pgmon 포함 | Y면 `pg_mon/`을 `postgresql/monitoring/pgmon/`으로 복사 |
 | 의존 패키지 다운로드 | Y면 각 모듈 `manifest.json`의 `requires.rpm`을 의존성까지 포함해 `PKG/`에 받음 (CRB/PowerTools 자동 활성화) |
 | pg_tune_ai 포함 | 이 레포 옆(`../pg_tune_ai`) 또는 `PG_TUNE_AI_DIR` 에 [pg_tune_ai](https://github.com/naturalTuna/pg_tune_ai)가 있으면 물어봄. Y면 `tools/pg_tune_ai/`로 복사 |
+
+**진행 순서**: PG 소스 → 빌드 기능 판단 → rpm → extension → (시험 빌드) → HA 패키지 → pgmon / installer / pg_tune_ai 복사 → `BUILD_LOCK.txt`
+
+### 자동 관리 — PG 버전별 패키지 / extension 태그
+
+사람이 "PG 몇 버전엔 무슨 패키지" 표를 관리하지 않도록, 받은 PG 소스와 GitHub 태그를 보고 자동으로 정합니다.
+
+**빌드 기능 (rpm)**
+- `pg_installer/manifest.json` 의 `features` 에 `이름 / configure 옵션 / pkg-config / rpm` 만 적어둡니다 (PG 버전 표기 없음).
+- 받은 PG 소스의 `configure` 를 읽어서 **그 버전이 지원하는 옵션만** 골라 rpm 을 받고, `installer/build_features.txt` 를 만듭니다.
+  예) PG17 → `--with-liburing` 이 없으니 io_uring / liburing-devel 자동 제외, PG18 → 포함
+- 설치 스크립트는 `build_features.txt` 를 읽어서, 해당 -devel 이 실제로 설치된 기능만 켭니다.
+
+**extension 태그**
+- 카탈로그 `git_ref` 가 `"auto"` 면 GitHub 태그 중 **최신 정식 릴리스**(rc/beta 제외)를 고릅니다. 태그를 직접 적으면 고정입니다.
+- `ref_pattern` 으로 후보를 좁힐 수 있습니다. `{major}` 는 선택한 PG 메이저로 바뀝니다.
+  예) pgaudit `"^{major}\\."` → PG17 이면 `17.x` 중 최신, PG18 이면 `18.x` 중 최신
+
+**BUILD_LOCK.txt (재현)**
+- 매 다운로드마다 PG 버전 / 켜진 기능 / extension 태그 / 시험 빌드 결과 / 받은 rpm 목록을 기록합니다.
+- `bash pg_download.sh --lock BUILD_LOCK.txt` → 같은 PG 버전·기능·extension 태그로 다시 받습니다 (고객사별 동일 구성).
+  rpm 은 기록용이고, 재다운로드 시에는 저장소의 현재 버전을 받습니다.
+- 설치 로그(`pg_install.log`)에도 lock 내용이 남습니다.
+
+### 시험 빌드 (`--verify`, 기본 꺼짐)
+
+"받은 구성으로 폐쇄망에서 빌드가 되는가" 를 다운로드 서버에서 미리 확인합니다. **다운로드 서버에 빌드 환경을 설치**하므로 필요할 때만 켜세요.
+
+1. `gcc`, `make`, 받을 -devel 들을 이 서버에 `sudo dnf install`
+2. PG 를 임시 경로에 configure / make / install (설치 스크립트와 같은 옵션 규칙)
+   - 지원은 되는데 -devel 을 못 설치한 기능은 "이 OS 저장소에 없음 → 설치 서버에서도 빠짐" 으로 표시
+3. extension 을 그 PG 로 PGXS 빌드 — **실패하면 이전 태그로 자동 후퇴** (후보 최대 4개), 전부 실패하면 패키지에서 제외
+4. `ldd` / `rpm -qf` 로 런타임 라이브러리 누락 점검
+5. 결과 → `VERIFY_REPORT.txt` (상세 로그 `VERIFY.log`), `BUILD_LOCK.txt` 의 `VERIFY=` 에 기록
+
+임시 빌드는 끝나면 지웁니다 (설치된 -devel 패키지는 남음). PG 빌드 때문에 수 분 더 걸립니다.
+
+> 시험 빌드는 "컴파일이 되는가" 까지 확인합니다. pgaudit 처럼 PG 메이저와 짝이 정해진 extension 은 다른 메이저 태그도 컴파일은 될 수 있으므로 `ref_pattern` 으로 메이저를 맞춰두세요 (기본 카탈로그는 설정돼 있음).
 
 끝나면 `postgresql/` 디렉토리를 통째로 폐쇄망 서버로 옮깁니다.
 
@@ -133,6 +176,8 @@ bash postgresql_install.sh -c install.conf -y     # 완전 무인 — 없는 항
 
 ### 빌드 옵션 (configure)
 
+`installer/build_features.txt`(pg_download 가 PG 버전에 맞춰 생성)를 따릅니다. 파일이 없는 이전 패키지는 아래 기본 규칙을 씁니다.
+
 | 옵션 | 조건 | 필요한 rpm |
 |---|---|---|
 | `--with-openssl --with-libxml --with-libxslt --enable-nls --with-python --with-tcl --with-perl` | 항상 | openssl/libxml2/libxslt/python3/tcl/perl -devel, gettext |
@@ -140,7 +185,7 @@ bash postgresql_install.sh -c install.conf -y     # 완전 무인 — 없는 항
 | `--with-zstd` | `libzstd-devel` 이 있으면 | libzstd-devel (`wal_compression = zstd`, pg_basebackup 압축) |
 | `--with-systemd` | `systemd-devel` 이 있으면 | systemd-devel |
 | `--with-uuid=e2fs` | `libuuid-devel` 이 있으면 | libuuid-devel (contrib `uuid-ossp`) |
-| `--with-liburing` | **PG18 이상** + `liburing-devel` 이 있으면 | liburing-devel (`io_method = io_uring`, 커널 5.1+ → 사실상 RHEL9) |
+| `--with-liburing` | **그 PG 버전이 지원하면(18+)** + `liburing-devel` 이 있으면 | liburing-devel (`io_method = io_uring`, 커널 5.1+ → 사실상 RHEL9) |
 
 - `-devel` 이 없으면 해당 옵션만 빼고 빌드하고, 뺀 목록을 경고로 보여줍니다 (configure 가 통째로 실패하지 않도록).
 - 실제 사용한 옵션은 `<엔진경로>/etc/configure_options.txt` 에 남습니다 (`pg_config --configure` 로도 확인 가능).
@@ -296,18 +341,18 @@ psql -U postgres -d postgres -f pgmon/sql/init.sql
 | source | 동작 |
 |---|---|
 | `contrib` | PostgreSQL 소스에 포함 — 빌드 시 contrib와 함께 설치됨 |
-| `git` | `pg_download.sh`가 `https://github.com/<repo>/archive/refs/tags/<git_ref>.tar.gz` 를 받아 `installer/extensions/`에 넣음 |
+| `git` | `pg_download.sh`가 `https://github.com/<repo>/archive/refs/tags/<태그>.tar.gz` 를 받아 `installer/extensions/`에 넣음. 태그는 `git_ref` (`"auto"` = 최신 정식 릴리스, `ref_pattern` 적용) |
 | `disabled` | 카탈로그에만 등재, 다운로드 안 함 |
 
-새 extension을 받으려면 항목의 `source`를 `git`으로 바꾸고 `repo`, `git_ref`(릴리스 태그)를 채웁니다.
+새 extension을 받으려면 항목의 `source`를 `git`으로 바꾸고 `repo` 를 채웁니다. `git_ref` 는 `"auto"` 로 두거나 특정 태그로 고정합니다.
 받은 tarball은 `postgresql_install.sh` 가 PG 빌드 직후 PGXS 로 자동 빌드·설치합니다
 (실패해도 설치는 계속되고, 실패 목록과 `shared_preload_libraries` 등록이 필요한 extension 을 안내합니다).
 기본으로 켜져 있는 것:
 
 | extension | 용도 | 사용 방법 |
 |---|---|---|
-| `hypopg` 1.4.1 | pg_tune_ai 인덱스 후보 가상 검증 | `CREATE EXTENSION hypopg;` |
-| `pgvector` v0.8.7 | 벡터 타입 / 유사도 검색 (HNSW, IVFFlat) | `CREATE EXTENSION vector;` (이름이 `vector`) |
+| `hypopg` (auto) | pg_tune_ai 인덱스 후보 가상 검증 | `CREATE EXTENSION hypopg;` |
+| `pgvector` (auto) | 벡터 타입 / 유사도 검색 (HNSW, IVFFlat) | `CREATE EXTENSION vector;` (이름이 `vector`) |
 
 - **설치(빌드)만 되고 DB 에는 아무 영향이 없습니다.** 쓰려면 해당 DB 에서 `CREATE EXTENSION` 해야 합니다.
 - `pg_cron`, `pgaudit` 등 preload 가 필요한 건 `shared_preload_libraries` 에 안 넣으면 기능만 동작 안 하고 **기동에는 문제 없습니다.**
@@ -323,16 +368,21 @@ psql -U postgres -d postgres -f pgmon/sql/init.sql
   "module": "pg_installer",
   "version": "1.0",
   "requires": {
-    "rpm": ["gcc", "make", "readline-devel", "lz4-devel", "..."],
-    "rpm_by_major": {
-      "18": ["liburing-devel"]
-    }
-  }
+    "rpm": ["gcc", "make", "readline-devel", "..."],
+    "rpm_by_major": { }
+  },
+  "configure_base": ["--with-openssl", "--with-libxml", "..."],
+  "features": [
+    { "name": "lz4",      "configure": "--with-lz4",      "pkgconfig": "liblz4",   "rpm": ["lz4-devel"] },
+    { "name": "io_uring", "configure": "--with-liburing", "pkgconfig": "liburing", "rpm": ["liburing-devel"] }
+  ]
 }
 ```
 
-`pg_download.sh`가 `pg_installer/manifest.json`과 (pgmon 선택 시) `pg_mon/manifest.json`의 `requires.rpm`을 합쳐서 다운로드합니다.
-`rpm_by_major` 는 선택한 PG 메이저가 키 값 **이상**일 때만 추가로 받습니다 (예: PG18 → `liburing-devel`). 저장소에 없는 패키지는 건너뜁니다.
+- `requires.rpm` : 항상 받는 rpm. `pg_mon/manifest.json` (pgmon 선택 시) 과 합쳐서 받습니다.
+- `configure_base` : 항상 쓰는 configure 옵션
+- `features` : 선택 기능. 받은 PG 소스가 지원하는 것만 rpm 을 받고 옵션을 켭니다. **새 기능은 한 줄 추가**하면 됩니다.
+- `rpm_by_major` : 기능으로 표현하기 어려운 버전 전용 rpm 이 생기면 `"19": [...]` 처럼 추가 (키 = 최소 메이저). 저장소에 없는 패키지는 건너뜁니다.
 설치에 rpm이 더 필요하면 해당 모듈의 manifest에만 추가하면 됩니다.
 
 ---
