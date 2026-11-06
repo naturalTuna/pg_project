@@ -533,6 +533,8 @@ init_modify_menu() {
                         repo_psql -q -c \
                             "UPDATE pgmon.registered_db SET active=false WHERE nickname='${nick}'" 2>/dev/null
                         # conf 에서 해당 항목 제거 후 재번호 부여
+                        # 삭제 전 collector 중지 (watchdog 재기동 대상에서도 제외)
+                        declare -F cc_stop >/dev/null && cc_stop "$sel"
                         _remove_target_from_conf "$sel"
                         conf_save
                     fi

@@ -1,0 +1,8 @@
+# pgmon 실행 산출물 (접속 정보 / 로그 / 상태 파일)
+pg_mon/conf/*
+!pg_mon/conf/*.sample
+# pg_download.sh 결과물
+postgresql/
+# pg_tune 로그 / 파이썬 캐시
+pgtune_log/
+__pycache__/
