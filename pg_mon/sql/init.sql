@@ -280,16 +280,24 @@ CREATE TABLE IF NOT EXISTS alert_config (
     updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-INSERT INTO alert_config (db_id, metric_name, warn_threshold, crit_threshold) VALUES
-  (NULL, 'cpu_usage_pct',        70, 90),
-  (NULL, 'mem_usage_pct',        75, 90),
-  (NULL, 'swap_usage_pct',       50, 80),
-  (NULL, 'lock_count',            5, 20),
-  (NULL, 'idle_in_tx_sessions',   5, 15),
-  (NULL, 'long_sessions',         3, 10),
-  (NULL, 'dead_ratio_pct',       20, 50),
-  (NULL, 'replication_lag_sec',  30, 120)
-ON CONFLICT DO NOTHING;
+-- alert_config 에는 unique 제약이 없어 ON CONFLICT 가 동작하지 않으므로
+-- NOT EXISTS 로 중복 삽입을 막는다 (init.sql 재실행 대비)
+INSERT INTO alert_config (db_id, metric_name, warn_threshold, crit_threshold)
+SELECT NULL, v.metric, v.warn, v.crit
+FROM (VALUES
+  ('cpu_usage_pct',        70, 90),
+  ('mem_usage_pct',        75, 90),
+  ('swap_usage_pct',       50, 80),
+  ('lock_count',            5, 20),
+  ('idle_in_tx_sessions',   5, 15),
+  ('long_sessions',         3, 10),
+  ('dead_ratio_pct',       20, 50),
+  ('replication_lag_sec',  30, 120)
+) AS v(metric, warn, crit)
+WHERE NOT EXISTS (
+  SELECT 1 FROM alert_config a
+  WHERE a.db_id IS NULL AND a.metric_name = v.metric
+);
 
 -- -------------------------------------------------------
 -- Alert 이력

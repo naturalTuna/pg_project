@@ -28,7 +28,9 @@
       "gzip",
       "bzip2",
       "bc",
-      "glibc-langpack-ko"
+      "glibc-langpack-ko",
+      "gettext",
+      "glibc-langpack-en"
     ]
   }
 }

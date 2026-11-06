@@ -1,3 +1,4 @@
+#!/bin/bash
 # ============================================================
 #  PostgreSQL Install Script v1.0
 #  - single 모드 : 로컬 서버에 PostgreSQL 설치
@@ -97,7 +98,8 @@ if pgrep -x "postgres" > /dev/null 2>&1; then
     ps aux | grep "[p]ostgres" | head -5
     echo ""
     read -rp "계속 진행하시겠습니까? [y/N]: " PROC_CONTINUE
-    [[ ! "${PROC_CONTINUE:-N,,}" =~ ^(y|yes)$ ]] && { info "설치 중단."; exit 0; }
+    PROC_CONTINUE="${PROC_CONTINUE:-N}"
+    [[ ! "${PROC_CONTINUE,,}" =~ ^(y|yes)$ ]] && { info "설치 중단."; exit 0; }
 else
     info "실행 중인 PostgreSQL 프로세스가 없습니다."
 fi
@@ -106,7 +108,8 @@ fi
 #  STEP 1. 기본 입력값 수집
 # ============================================================
 read -rp "PostgreSQL 을 설치하시겠습니까? [Y/n]: " DO_INSTALL
-[[ ! "${DO_INSTALL:-Y,,}" =~ ^(y|yes)$ ]] && { info "설치 중단."; exit 0; }
+DO_INSTALL="${DO_INSTALL:-Y}"
+[[ ! "${DO_INSTALL,,}" =~ ^(y|yes)$ ]] && { info "설치 중단."; exit 0; }
 
 # 설치 모드
 echo ""
@@ -151,7 +154,8 @@ HA_SSH_PORT="" ; CLUSTER_NAME=""
 REPL_USER_HA="" ; REPL_PASS_HA=""
 PRI_CPU="" ; PRI_MEM_GB=""
 SBY_CPU="" ; SBY_MEM_GB=""
-PG_PORT=""
+# PG_PORT 는 여기서 초기화하지 않는다 (single 모드에서 위에서 입력받은 값 유지)
+[[ "${INSTALL_MODE}" == "ha" ]] && PG_PORT=""
 
 if [[ "${INSTALL_MODE}" == "ha" ]]; then
 
@@ -317,7 +321,8 @@ echo -e "${BOLD}  ║${NC}  Log 경로   : ${LOG_PATH}"
 echo -e "${BOLD}  ╚══════════════════════════════════════════════╝${NC}"
 echo ""
 read -rp "위 설정으로 설치를 진행하시겠습니까? [Y/n]: " CONFIRM
-[[ ! "${CONFIRM:-Y,,}" =~ ^(y|yes)$ ]] && { info "설치 중단."; exit 0; }
+CONFIRM="${CONFIRM:-Y}"
+[[ ! "${CONFIRM,,}" =~ ^(y|yes)$ ]] && { info "설치 중단."; exit 0; }
 
 # ============================================================
 #  로그 초기화
@@ -1062,6 +1067,22 @@ if [[ "${INSTALL_MODE}" == "ha" ]]; then
     info "사전 조건 점검 완료 ✔ 모든 항목 정상"
     info "============================================================"
 
+    # ── 호스트명 → IP 변환 ──────────────────────────────────
+    #  etcd listen-*-urls 는 IP 만 허용하고, pg_hba 의 CIDR(/24) 표기도
+    #  호스트명과 함께 쓸 수 없으므로 IP 로 변환해서 사용한다.
+    fn_resolve_ip() {
+        local _h="$1" _ip
+        if [[ "${_h}" =~ ^[0-9]+(\.[0-9]+){3}$ ]]; then
+            echo "${_h}"; return 0
+        fi
+        _ip=$(getent ahostsv4 "${_h}" 2>/dev/null | awk 'NR==1{print $1}')
+        echo "${_ip:-${_h}}"
+    }
+    HA_ETCD_IP=$(fn_resolve_ip "${HA_ETCD_HOST}")
+    HA_PRIMARY_IP=$(fn_resolve_ip "${HA_PRIMARY_HOST}")
+    HA_STANDBY_IP=$(fn_resolve_ip "${HA_STANDBY_HOST}")
+    info "IP 확인: etcd=${HA_ETCD_IP} / primary=${HA_PRIMARY_IP} / standby=${HA_STANDBY_IP}"
+
     # ── SSH 연결 및 sudo 권한 확인 ───────────────────────────
     info "SSH 연결 확인 중..."
     ssh ${SSH_OPTS} "${HA_PRIMARY_HOST}" "echo 'Primary SSH OK'" \
@@ -1094,8 +1115,8 @@ if [[ "${INSTALL_MODE}" == "ha" ]]; then
     sudo bash -c "cat > /etc/etcd/etcd.conf" <<ETCDCONF
 name: etcd-node
 data-dir: /var/lib/etcd
-listen-peer-urls: http://${HA_ETCD_HOST}:2380
-listen-client-urls: http://${HA_ETCD_HOST}:2379,http://127.0.0.1:2379
+listen-peer-urls: http://${HA_ETCD_IP}:2380
+listen-client-urls: http://${HA_ETCD_IP}:2379,http://127.0.0.1:2379
 initial-advertise-peer-urls: http://${HA_ETCD_HOST}:2380
 advertise-client-urls: http://${HA_ETCD_HOST}:2379
 initial-cluster: etcd-node=http://${HA_ETCD_HOST}:2380
@@ -1247,12 +1268,12 @@ bootstrap:
     - local replication     all                               trust
     - host  replication     all             127.0.0.1/32      trust
     - host  replication     all             ::1/128           trust
-    - host replication ${REPL_USER_HA} ${HA_PRIMARY_HOST}/24 trust
-    - host replication ${REPL_USER_HA} ${HA_STANDBY_HOST}/24 trust
-    - host postgres    ${REPL_USER_HA} ${HA_PRIMARY_HOST}/24 trust
-    - host postgres    ${REPL_USER_HA} ${HA_STANDBY_HOST}/24 trust
-    - host all         all             ${HA_PRIMARY_HOST}/24 trust
-    - host all         all             ${HA_STANDBY_HOST}/24 trust
+    - host replication ${REPL_USER_HA} ${HA_PRIMARY_IP}/24 trust
+    - host replication ${REPL_USER_HA} ${HA_STANDBY_IP}/24 trust
+    - host postgres    ${REPL_USER_HA} ${HA_PRIMARY_IP}/24 trust
+    - host postgres    ${REPL_USER_HA} ${HA_STANDBY_IP}/24 trust
+    - host all         all             ${HA_PRIMARY_IP}/24 trust
+    - host all         all             ${HA_STANDBY_IP}/24 trust
     - host all         all             0.0.0.0/0             scram-sha-256
 
   users:
@@ -1415,12 +1436,12 @@ bootstrap:
     - local replication     all                               trust
     - host  replication     all             127.0.0.1/32      trust
     - host  replication     all             ::1/128           trust
-    - host replication ${REPL_USER_HA} ${HA_PRIMARY_HOST}/24 trust
-    - host replication ${REPL_USER_HA} ${HA_STANDBY_HOST}/24 trust
-    - host postgres    ${REPL_USER_HA} ${HA_PRIMARY_HOST}/24 trust
-    - host postgres    ${REPL_USER_HA} ${HA_STANDBY_HOST}/24 trust
-    - host all         all             ${HA_PRIMARY_HOST}/24 trust
-    - host all         all             ${HA_STANDBY_HOST}/24 trust
+    - host replication ${REPL_USER_HA} ${HA_PRIMARY_IP}/24 trust
+    - host replication ${REPL_USER_HA} ${HA_STANDBY_IP}/24 trust
+    - host postgres    ${REPL_USER_HA} ${HA_PRIMARY_IP}/24 trust
+    - host postgres    ${REPL_USER_HA} ${HA_STANDBY_IP}/24 trust
+    - host all         all             ${HA_PRIMARY_IP}/24 trust
+    - host all         all             ${HA_STANDBY_IP}/24 trust
     - host all         all             0.0.0.0/0             scram-sha-256
 
   users:
@@ -1529,7 +1550,8 @@ PATRONI_INSTALL_EOF
         local _BIN
         _BIN=$(ssh ${SSH_OPTS} "${_HOST}" \
             "command -v patroni 2>/dev/null || echo /usr/local/bin/patroni")
-        info "[${_LABEL}] Patroni 설치 완료 (bin: ${_BIN})"
+        # $(...) 로 반환값을 캡처하므로 안내 메시지는 stderr 로 보낸다
+        info "[${_LABEL}] Patroni 설치 완료 (bin: ${_BIN})" >&2
         echo "${_BIN}"
     }
 
@@ -1577,13 +1599,21 @@ PUPDATE_SVC
     info "[Primary] postgresql.conf 적용 중..."
     ssh ${SSH_OPTS} "${HA_PRIMARY_HOST}" bash >> "${HA_LOG}" 2>&1 <<PAPPLY_CONF
 if [[ -f /tmp/postgresql.conf.patroni ]]; then
-    cp /tmp/postgresql.conf.patroni "${DATA_PATH}/postgresql.conf"
+    # Patroni 는 postgresql.conf 를 직접 관리하고(primary_conninfo, listen 등)
+    # initdb/클론 시 생긴 원본은 postgresql.base.conf 로 옮겨 include 한다.
+    # postgresql.conf 를 덮어쓰면 Patroni 설정이 날아가므로 base.conf 에 적용.
+    if [[ -f "${DATA_PATH}/postgresql.base.conf" ]]; then
+        cp /tmp/postgresql.conf.patroni "${DATA_PATH}/postgresql.base.conf"
+    else
+        echo "[WARN] postgresql.base.conf 없음 — 튜닝 conf 미적용 (/tmp/postgresql.conf.patroni 보존)"
+        exit 0
+    fi
     rm -f /tmp/postgresql.conf.patroni
-    # Patroni API로 reload (pg_ctl reload 대신 — Patroni 관리 하에 있으므로)
     ${ENGINE_PATH}/bin/pg_ctl reload -D "${DATA_PATH}" 2>/dev/null || true
 fi
 PAPPLY_CONF
-    info "[Primary] postgresql.conf 적용 완료"
+    info "[Primary] postgresql.conf 튜닝값 적용 완료 (postgresql.base.conf)"
+    info "  ※ shared_buffers 등 재시작 필요 항목은 patronictl restart 후 반영됩니다."
 
     # ── postgres 스키마 생성 + search_path (Primary 1회) ──
     #   Standby 는 Patroni 가 pg_basebackup 으로 클론하므로 자동 복제됨
@@ -1641,12 +1671,20 @@ SUPDATE_SVC
         info "[Standby] postgresql.conf 적용 중..."
         ssh ${SSH_OPTS} "${HA_STANDBY_HOST}" bash >> "${HA_LOG}" 2>&1 <<SAPPLY_CONF
 if [[ -f /tmp/postgresql.conf.patroni ]]; then
-    cp /tmp/postgresql.conf.patroni "${DATA_PATH}/postgresql.conf"
+    # Patroni 는 postgresql.conf 를 직접 관리하고(primary_conninfo, listen 등)
+    # initdb/클론 시 생긴 원본은 postgresql.base.conf 로 옮겨 include 한다.
+    # postgresql.conf 를 덮어쓰면 Patroni 설정이 날아가므로 base.conf 에 적용.
+    if [[ -f "${DATA_PATH}/postgresql.base.conf" ]]; then
+        cp /tmp/postgresql.conf.patroni "${DATA_PATH}/postgresql.base.conf"
+    else
+        echo "[WARN] postgresql.base.conf 없음 — 튜닝 conf 미적용 (/tmp/postgresql.conf.patroni 보존)"
+        exit 0
+    fi
     rm -f /tmp/postgresql.conf.patroni
     ${ENGINE_PATH}/bin/pg_ctl reload -D "${DATA_PATH}" 2>/dev/null || true
 fi
 SAPPLY_CONF
-        info "[Standby] postgresql.conf 적용 완료"
+        info "[Standby] postgresql.conf 튜닝값 적용 완료 (postgresql.base.conf)"
     fi
 
     # ── 5-5. 클러스터 최종 상태 확인 ────────────────────────

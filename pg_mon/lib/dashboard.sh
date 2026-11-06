@@ -4,39 +4,7 @@
 # =============================================================
 source "$(dirname "${BASH_SOURCE[0]}")/ui.sh"
 
-# ── OS 메트릭 수집 (로컬 or remote via SSH) ──────────────────
-_collect_os() {
-    local host=$1
-    # CPU
-    CPU_USAGE=$(top -bn1 2>/dev/null | grep "Cpu(s)" \
-        | awk '{print 100 - $8}' | cut -d. -f1 || echo "0")
-    # MEM
-    local mem_info
-    mem_info=$(free -m 2>/dev/null)
-    MEM_TOTAL=$(echo "$mem_info" | awk '/^Mem:/{print $2}')
-    MEM_USED=$( echo "$mem_info" | awk '/^Mem:/{print $3}')
-    MEM_FREE=$( echo "$mem_info" | awk '/^Mem:/{print $4}')
-    MEM_AVAIL=$(echo "$mem_info" | awk '/^Mem:/{print $7}')
-    [[ -z "$MEM_TOTAL" || "$MEM_TOTAL" == "0" ]] && MEM_TOTAL=1
-    MEM_PCT=$(( (MEM_USED * 100) / MEM_TOTAL ))
-
-    # SWAP
-    SWAP_TOTAL=$(echo "$mem_info" | awk '/^Swap:/{print $2}')
-    SWAP_USED=$( echo "$mem_info" | awk '/^Swap:/{print $3}')
-    [[ -z "$SWAP_TOTAL" || "$SWAP_TOTAL" == "0" ]] && SWAP_TOTAL=1
-    SWAP_PCT=$(( (SWAP_USED * 100) / SWAP_TOTAL ))
-
-    # Disk IO (iostat, 1초 샘플)
-    if command -v iostat &>/dev/null; then
-        local io
-        io=$(iostat -d -k 1 2 2>/dev/null | tail -n +4 | \
-             awk 'NF>3{r+=$3; w+=$4} END{printf "%.1f %.1f", r, w}')
-        DISK_READ_KB=$(echo "$io" | awk '{print $1}')
-        DISK_WRITE_KB=$(echo "$io" | awk '{print $2}')
-    else
-        DISK_READ_KB="N/A"; DISK_WRITE_KB="N/A"
-    fi
-}
+source "$(dirname "${BASH_SOURCE[0]}")/osmetrics.sh"
 
 # ── DB 메트릭 수집 ────────────────────────────────────────────
 _collect_db() {
@@ -156,7 +124,8 @@ dashboard_render() {
     local nick_display="[${TARGET_NICKNAME}]"
 
     # 데이터 수집
-    _collect_os "$(_pgmon_k1="TARGET_${idx}_HOST"; echo "${!_pgmon_k1}")"
+    # 대상 DB 서버 OS 지표 (DB의 /proc 읽기 → 실패 시 SSH)
+    os_collect "$idx" || true
     _collect_db "$idx"
 
     # 화면 그리기
@@ -168,7 +137,7 @@ dashboard_render() {
     printf "  "
     ui_kv "DB Version"  "${PG_VERSION}"       28
     printf "  "
-    ui_kv "Host / IP"   "$(hostname) / ${SERVER_IP}"  28
+    ui_kv "Host / IP"   "${OS_HOSTNAME:-?} / ${SERVER_IP}"  28
     printf "  "
     ui_kv "DB Name"     "${PG_DBNAME}"        28
     printf "  "
@@ -202,7 +171,13 @@ dashboard_render() {
     fi
 
     # ── 2. Host Resources ─────────────────────────────────────
-    ui_section "Host Resources"
+    case "${OS_SRC}" in
+        db)  ui_section "Host Resources  (DB 서버 · pg_read_file)" ;;
+        ssh) ui_section "Host Resources  (DB 서버 · SSH)" ;;
+        *)   ui_section "Host Resources  (수집 불가)"
+             printf "  ${C_BYELLOW}⚠ DB 서버 OS 지표를 가져오지 못했습니다.${C_RESET}\n"
+             printf "  ${C_DIM}  모니터링 role 에 pg_read_server_files 를 부여하거나, pgmon 서버 → DB 서버 SSH 키를 교환하세요.${C_RESET}\n" ;;
+    esac
 
     local cpu_color=$C_BGREEN
     [[ "${CPU_USAGE:-0}" -ge 70 ]] && cpu_color=$C_BYELLOW

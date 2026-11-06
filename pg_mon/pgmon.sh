@@ -12,6 +12,7 @@ export PGMON_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # ── 의존 라이브러리 로드 ──────────────────────────────────────
 source "${PGMON_HOME}/lib/ui.sh"
 source "${PGMON_HOME}/lib/init.sh"
+source "${PGMON_HOME}/lib/osmetrics.sh"
 source "${PGMON_HOME}/lib/dashboard.sh"
 source "${PGMON_HOME}/lib/session.sh"
 source "${PGMON_HOME}/lib/statement.sh"
@@ -32,9 +33,8 @@ _check_deps() {
         printf "  설치 예) sudo apt install postgresql-client bc\n\n"
         exit 1
     fi
-    # iostat은 선택
-    command -v iostat &>/dev/null || \
-        printf "${C_BYELLOW}⚠ iostat 없음 (sysstat 설치 권장) — Disk I/O 미수집${C_RESET}\n"
+    # OS 지표는 대상 DB 서버의 /proc 을 DB 접속(pg_read_file) 또는 SSH 로 읽으므로
+    # pgmon 서버에 iostat 등은 필요 없음
 }
 
 # ── Cleanup ────────────────────────────────────────────────────
