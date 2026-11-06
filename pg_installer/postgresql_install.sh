@@ -451,6 +451,10 @@ fn_gen_conf() {
     [[ $KEEP_WAL -lt 512 ]] && KEEP_WAL=512
     local PARA=$(( CPU / 2 ))
     [[ $PARA -lt 1 ]] && PARA=1
+    # lc_messages: 없는 로케일을 지정하면 서버가 기동 실패(FATAL)하므로
+    # en_US.utf8 이 있을 때만 쓰고 없으면 C (영문 메시지는 동일)
+    local LC_MSG="C"
+    if locale -a 2>/dev/null | grep -qiE '^en_US\.utf-?8$'; then LC_MSG="en_US.utf8"; fi
 
     cat > "${OUT}" <<CONFEOF
 # ============================================================
@@ -511,9 +515,15 @@ log_connections   = on
 log_disconnections= on
 log_lock_waits    = on
 
+# ── 쿼리 통계 (pgmon Statement / pg_tune_ai) ──────────────
+shared_preload_libraries   = 'pg_stat_statements'
+pg_stat_statements.max     = 10000
+pg_stat_statements.track   = top
+track_io_timing            = on
+
 # ── 타임존 / 로케일 ────────────────────────────────────────
 timezone          = 'Asia/Seoul'
-lc_messages       = 'en_US.utf8'
+lc_messages       = '${LC_MSG}'
 lc_monetary       = '${PG_LOCALE}'
 lc_numeric        = '${PG_LOCALE}'
 lc_time           = '${PG_LOCALE}'
@@ -548,26 +558,59 @@ fn_install_pkg_local() {
 # ── PG 빌드 함수 (로컬) ──────────────────────────────────────
 fn_build_pg_local() {
     local BUILD_CPU="${1:-${CPU_CORES}}"
+
+    # ── configure 옵션 ──────────────────────────────────────
+    #  기본 옵션 + 라이브러리(-devel)가 실제로 설치돼 있는 것만 켠다.
+    #  (PKG 에 -devel 이 빠졌을 때 configure 자체가 실패하지 않도록)
+    #  ※ 마이너 업그레이드 시 같은 옵션으로 다시 빌드해야 하므로
+    #    ${ENGINE_PATH}/etc/configure_options.txt 에 기록한다 (pg_config --configure 로도 확인 가능)
+    local CONF_OPTS=(--prefix="${ENGINE_PATH}"
+                     --with-openssl --with-libxml --with-libxslt
+                     --enable-nls --with-python --with-tcl --with-perl)
+    local _skipped=()
+    _has_pc() { pkg-config --exists "$1" 2>/dev/null; }
+    if _has_pc liblz4;     then CONF_OPTS+=(--with-lz4);       else _skipped+=("lz4(lz4-devel)"); fi
+    if _has_pc libzstd;    then CONF_OPTS+=(--with-zstd);      else _skipped+=("zstd(libzstd-devel)"); fi
+    if _has_pc libsystemd; then CONF_OPTS+=(--with-systemd);   else _skipped+=("systemd(systemd-devel)"); fi
+    if _has_pc uuid;       then CONF_OPTS+=(--with-uuid=e2fs); else _skipped+=("uuid-ossp(libuuid-devel)"); fi
+    # PG18+: io_uring (io_method=io_uring). 커널 5.1+ 필요 → 사실상 RHEL9 이상
+    if [[ "${PG_MAJOR}" -ge 18 ]]; then
+        if _has_pc liburing; then CONF_OPTS+=(--with-liburing); else _skipped+=("io_uring(liburing-devel)"); fi
+    fi
+
     info "PostgreSQL 소스 빌드 중 (make -j${BUILD_CPU})..."
+    info "  configure: ${CONF_OPTS[*]:1}"
+    if [[ ${#_skipped[@]} -gt 0 ]]; then
+        warn "  -devel 없어서 제외: ${_skipped[*]}"
+    fi
+
     local TMP
     TMP=$(mktemp -d)
     tar -zxf "${PG_TARBALL}" -C "${TMP}" >> "${LOG_INSTALL}" 2>&1
     pushd "${TMP}/postgresql-${PG_VERSION}" > /dev/null
-    ./configure \
-        --prefix="${ENGINE_PATH}" \
-        --with-openssl --with-libxml --with-libxslt \
-        --enable-nls --with-python --with-tcl --with-perl \
+    ./configure "${CONF_OPTS[@]}" \
         >> "${LOG_INSTALL}" 2>&1 || error "configure 실패. 로그: ${LOG_INSTALL}"
     make -j"${BUILD_CPU}"  >> "${LOG_INSTALL}" 2>&1 || error "make 실패"
     make install           >> "${LOG_INSTALL}" 2>&1 || error "make install 실패"
-    # contrib (pg_stat_statements, pg_buffercache, pgstattuple 등) 빌드/설치
+    # contrib (pg_stat_statements, pg_buffercache, pgstattuple, uuid-ossp 등) 빌드/설치
     cd contrib
     make -j"${BUILD_CPU}"  >> "${LOG_INSTALL}" 2>&1 || true
     make install           >> "${LOG_INSTALL}" 2>&1 || true
     cd ..
     popd > /dev/null
     rm -rf "${TMP}"
+
+    mkdir -p "${ENGINE_PATH}/etc"
+    {
+        echo "# PostgreSQL ${PG_VERSION} 빌드 옵션 ($(date '+%Y-%m-%d %H:%M:%S'))"
+        echo "# 마이너 업그레이드 시 같은 옵션으로 configure 하세요 (prefix 는 새 경로로 바꿔도 됨)"
+        echo "./configure ${CONF_OPTS[*]}"
+        if [[ ${#_skipped[@]} -gt 0 ]]; then
+            echo "# -devel 없어서 제외된 옵션: ${_skipped[*]}"
+        fi
+    } > "${ENGINE_PATH}/etc/configure_options.txt"
     info "PostgreSQL 빌드 및 설치 완료 → ${ENGINE_PATH} (contrib 포함)"
+    info "  빌드 옵션 기록 → ${ENGINE_PATH}/etc/configure_options.txt"
 }
 
 # ── Extension 소스 빌드 함수 (로컬) ──────────────────────────
@@ -589,10 +632,22 @@ fn_build_extensions_local() {
     for _t in "${_tars[@]}"; do
         _name=$(basename "${_t}" .tar.gz)
         _dir=$(mktemp -d)
+        # 카탈로그의 make_args (예: pgvector OPTFLAGS=) — 이름 "<key>-<ref>" 로 매칭
+        local _margs=()
+        if [[ -f "${EXT_SRC}/manifest.json" ]] && command -v python3 &>/dev/null; then
+            read -r -a _margs <<< "$(python3 - "${EXT_SRC}/manifest.json" "${_name}" <<'PY'
+import sys, json
+m = json.load(open(sys.argv[1])); n = sys.argv[2]
+for k, v in m.get("extensions", {}).items():
+    if n.startswith(k + "-"):
+        print(v.get("make_args", "")); break
+PY
+)"
+        fi
         if tar -xzf "${_t}" -C "${_dir}" --strip-components=1 >> "${LOG_INSTALL}" 2>&1 && \
            ( cd "${_dir}" && \
-             make USE_PGXS=1 PG_CONFIG="${PG_CONFIG_BIN}" -j"${BUILD_CPU}" && \
-             make USE_PGXS=1 PG_CONFIG="${PG_CONFIG_BIN}" install ) >> "${LOG_INSTALL}" 2>&1; then
+             make USE_PGXS=1 PG_CONFIG="${PG_CONFIG_BIN}" "${_margs[@]}" -j"${BUILD_CPU}" && \
+             make USE_PGXS=1 PG_CONFIG="${PG_CONFIG_BIN}" "${_margs[@]}" install ) >> "${LOG_INSTALL}" 2>&1; then
             info "  ✔ ${_name}"
             _ok=$(( _ok + 1 ))
             # shared_preload_libraries 등록이 필요한 extension 안내용
@@ -1096,11 +1151,12 @@ EOF
     # ── postgres 스키마 생성 + search_path = postgres, public ──
     info "postgres 스키마 생성 및 search_path 설정 중..."
     "${ENGINE_PATH}/bin/psql" -p "${PG_PORT}" -d postgres -U postgres <<'PGSCHEMA' >> "${LOG_INSTALL}" 2>&1
+CREATE EXTENSION IF NOT EXISTS pg_stat_statements SCHEMA public;
 CREATE SCHEMA IF NOT EXISTS postgres AUTHORIZATION postgres;
 ALTER ROLE postgres SET search_path = postgres, public;
 ALTER DATABASE postgres SET search_path = postgres, public;
 PGSCHEMA
-    info "postgres 스키마/search_path 설정 완료 (재접속 시 적용)"
+    info "pg_stat_statements 생성 + postgres 스키마/search_path 설정 완료 (재접속 시 적용)"
 
 fi  # end single
 
@@ -1450,6 +1506,8 @@ bootstrap:
         max_wal_senders: 10
         max_replication_slots: 10
         wal_keep_size: 512MB
+        shared_preload_libraries: pg_stat_statements
+        track_io_timing: on
 
   initdb:
     - encoding: UTF8
@@ -1618,6 +1676,8 @@ bootstrap:
         max_wal_senders: 10
         max_replication_slots: 10
         wal_keep_size: 512MB
+        shared_preload_libraries: pg_stat_statements
+        track_io_timing: on
 
   initdb:
     - encoding: UTF8
@@ -1815,6 +1875,7 @@ PAPPLY_CONF
     info "[Primary] postgres 스키마/search_path 설정 중..."
     ssh ${SSH_OPTS} "${HA_PRIMARY_HOST}" \
         "${ENGINE_PATH}/bin/psql -p ${PG_PORT} -U postgres -d postgres \
+         -c \"CREATE EXTENSION IF NOT EXISTS pg_stat_statements SCHEMA public;\" \
          -c \"CREATE SCHEMA IF NOT EXISTS postgres AUTHORIZATION postgres;\" \
          -c \"ALTER ROLE postgres SET search_path = postgres, public;\" \
          -c \"ALTER DATABASE postgres SET search_path = postgres, public;\"" \

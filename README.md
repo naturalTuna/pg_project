@@ -123,13 +123,34 @@ bash postgresql_install.sh -c install.conf -y     # 완전 무인 — 없는 항
 ### single 모드
 
 1. `PKG/`의 rpm 설치 (`dnf localinstall`)
-2. 소스 빌드 (`--with-openssl --with-libxml --with-libxslt --enable-nls --with-python --with-tcl --with-perl`) + contrib 설치
+2. 소스 빌드 + contrib 설치 (configure 옵션은 아래 **빌드 옵션** 참고)
    + `installer/extensions/*.tar.gz` (카탈로그 `source=git`) 를 PGXS 로 자동 빌드·설치
 3. `~/.postgresrc` 생성 (`PGHOME`, `PGDATA`, `PGPORT`, alias `pgstart` / `pgstop` / `pglog` 등) 후 `.bashrc`에 연결
 4. CPU / 메모리 입력값 기준으로 `postgresql.conf` 생성 (shared_buffers = 메모리 1/4, effective_cache_size = 3/4 등)
 5. initdb (`--data-checksums`) → pg_hba에 `0.0.0.0/0 scram-sha-256` 추가 → 기동
 6. 백업 사용 시 복제 유저 생성 + 백업 스크립트/크론 등록
-7. `postgres` 스키마 생성 및 `search_path = postgres, public` 설정
+7. `pg_stat_statements` 생성 (public 스키마), `postgres` 스키마 생성 및 `search_path = postgres, public` 설정
+
+### 빌드 옵션 (configure)
+
+| 옵션 | 조건 | 필요한 rpm |
+|---|---|---|
+| `--with-openssl --with-libxml --with-libxslt --enable-nls --with-python --with-tcl --with-perl` | 항상 | openssl/libxml2/libxslt/python3/tcl/perl -devel, gettext |
+| `--with-lz4` | `lz4-devel` 이 설치돼 있으면 | lz4-devel (`wal_compression = lz4`, TOAST lz4 압축) |
+| `--with-zstd` | `libzstd-devel` 이 있으면 | libzstd-devel (`wal_compression = zstd`, pg_basebackup 압축) |
+| `--with-systemd` | `systemd-devel` 이 있으면 | systemd-devel |
+| `--with-uuid=e2fs` | `libuuid-devel` 이 있으면 | libuuid-devel (contrib `uuid-ossp`) |
+| `--with-liburing` | **PG18 이상** + `liburing-devel` 이 있으면 | liburing-devel (`io_method = io_uring`, 커널 5.1+ → 사실상 RHEL9) |
+
+- `-devel` 이 없으면 해당 옵션만 빼고 빌드하고, 뺀 목록을 경고로 보여줍니다 (configure 가 통째로 실패하지 않도록).
+- 실제 사용한 옵션은 `<엔진경로>/etc/configure_options.txt` 에 남습니다 (`pg_config --configure` 로도 확인 가능).
+- **마이너 업그레이드는 폐쇄망 서버에서 다시 컴파일**하는 것이므로, 처음 받은 `PKG/`(-devel 포함)와 이 옵션 파일을 보관해두고 같은 옵션으로 configure 하세요.
+
+### 기본 적용되는 설정
+
+- `shared_preload_libraries = 'pg_stat_statements'`, `pg_stat_statements.max = 10000`, `track_io_timing = on`
+  (ha 모드는 `patroni.yml` 의 DCS 파라미터에 들어가서 첫 기동부터 적용) → 설치 직후 pgmon Statement 화면 / pg_tune_ai 바로 사용 가능
+- `lc_messages` 는 서버에 `en_US.utf8` 로케일이 있으면 그걸, 없으면 `C` (없는 로케일을 지정하면 PG 가 기동하지 않음)
 
 ### ha 모드
 
@@ -203,7 +224,7 @@ bash monitoring/pgmon/pgmon.sh
 3. 모니터링 대상 DB 등록 → 선택 시 대상 DB에 `pgmon_monitor` role 생성 (`pg_monitor`, `pg_read_all_stats`, `pg_read_server_files` 등 부여)
    - 등록 시 OS 지표 SSH fallback용 SSH 유저 / 포트도 입력 (기본: 현재 유저 / 22)
 4. 대상 DB에 `pg_stat_statements`, `pg_buffercache`, `pgstattuple` extension 설치 시도
-   - `pg_stat_statements`는 `shared_preload_libraries` 등록 + 재시작이 필요합니다.
+   - `pg_stat_statements` 는 `shared_preload_libraries` 가 필요합니다. 이 패키지의 `postgresql_install.sh` 로 설치한 DB 는 기본 적용돼 있고, 그 외 DB 는 등록 + 재시작이 필요합니다.
 
 설정은 `pgmon/conf/pgmon.conf` (권한 600)에 저장됩니다.
 
@@ -281,7 +302,19 @@ psql -U postgres -d postgres -f pgmon/sql/init.sql
 새 extension을 받으려면 항목의 `source`를 `git`으로 바꾸고 `repo`, `git_ref`(릴리스 태그)를 채웁니다.
 받은 tarball은 `postgresql_install.sh` 가 PG 빌드 직후 PGXS 로 자동 빌드·설치합니다
 (실패해도 설치는 계속되고, 실패 목록과 `shared_preload_libraries` 등록이 필요한 extension 을 안내합니다).
-기본으로 켜져 있는 건 `hypopg`(pg_tune_ai 검증용) 입니다.
+기본으로 켜져 있는 것:
+
+| extension | 용도 | 사용 방법 |
+|---|---|---|
+| `hypopg` 1.4.1 | pg_tune_ai 인덱스 후보 가상 검증 | `CREATE EXTENSION hypopg;` |
+| `pgvector` v0.8.7 | 벡터 타입 / 유사도 검색 (HNSW, IVFFlat) | `CREATE EXTENSION vector;` (이름이 `vector`) |
+
+- **설치(빌드)만 되고 DB 에는 아무 영향이 없습니다.** 쓰려면 해당 DB 에서 `CREATE EXTENSION` 해야 합니다.
+- `pg_cron`, `pgaudit` 등 preload 가 필요한 건 `shared_preload_libraries` 에 안 넣으면 기능만 동작 안 하고 **기동에는 문제 없습니다.**
+  반대로 `shared_preload_libraries` 에 넣었는데 해당 .so 가 없으면 **기동 실패**합니다.
+- `pgaudit` 부하는 설치가 아니라 `pgaudit.log` 설정에 달려 있습니다 (`ddl`, `role` 정도는 가볍고 `read,write`/`all` 은 무거움).
+- 항목별 `make_args` 로 빌드 인자를 줄 수 있습니다. pgvector 는 기본 빌드가 `-march=native`(빌드 서버 CPU 전용)라
+  ha 모드처럼 다른 서버로 복사하면 Illegal instruction 위험이 있어 `OPTFLAGS=` (범용 빌드) 로 설정돼 있습니다.
 
 ## manifest.json (모듈별 rpm)
 
@@ -290,12 +323,16 @@ psql -U postgres -d postgres -f pgmon/sql/init.sql
   "module": "pg_installer",
   "version": "1.0",
   "requires": {
-    "rpm": ["gcc", "make", "readline-devel", "..."]
+    "rpm": ["gcc", "make", "readline-devel", "lz4-devel", "..."],
+    "rpm_by_major": {
+      "18": ["liburing-devel"]
+    }
   }
 }
 ```
 
 `pg_download.sh`가 `pg_installer/manifest.json`과 (pgmon 선택 시) `pg_mon/manifest.json`의 `requires.rpm`을 합쳐서 다운로드합니다.
+`rpm_by_major` 는 선택한 PG 메이저가 키 값 **이상**일 때만 추가로 받습니다 (예: PG18 → `liburing-devel`). 저장소에 없는 패키지는 건너뜁니다.
 설치에 rpm이 더 필요하면 해당 모듈의 manifest에만 추가하면 됩니다.
 
 ---

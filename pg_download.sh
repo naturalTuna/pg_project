@@ -58,13 +58,20 @@ fi
 
 # ── manifest.json 파싱 헬퍼 ──────────────────────────────────
 fn_manifest_rpms() {
-    local manifest="$1"
-    python3 - "$manifest" <<'PY'
+    # $1=manifest  $2=PG 메이저(선택) — rpm_by_major 에서 "이 버전 이상" 항목도 추가
+    local manifest="$1" major="${2:-0}"
+    python3 - "$manifest" "$major" <<'PY'
 import sys, json
 with open(sys.argv[1]) as f:
     m = json.load(f)
-for r in m.get("requires", {}).get("rpm", []):
+major = int(sys.argv[2] or 0)
+req = m.get("requires", {})
+for r in req.get("rpm", []):
     print(r)
+for k, pkgs in req.get("rpm_by_major", {}).items():
+    if k.isdigit() and major >= int(k):
+        for r in pkgs:
+            print(r)
 PY
 }
 
@@ -219,8 +226,8 @@ declare -A _RPM_MAP
 
 while IFS= read -r pkg; do
     [[ -n "$pkg" ]] && _RPM_MAP["$pkg"]=1
-done < <(fn_manifest_rpms "${MODULE_INSTALLER}/manifest.json")
-info "pg_installer 요구 패키지: $(fn_manifest_rpms "${MODULE_INSTALLER}/manifest.json" | tr '\n' ' ')"
+done < <(fn_manifest_rpms "${MODULE_INSTALLER}/manifest.json" "${PG_MAJOR}")
+info "pg_installer 요구 패키지 (PG${PG_MAJOR}): $(fn_manifest_rpms "${MODULE_INSTALLER}/manifest.json" "${PG_MAJOR}" | tr '\n' ' ')"
 
 if [[ "${DOWNLOAD_MON,,}" =~ ^(y|yes)$ ]] && [[ -f "${MODULE_MON}/manifest.json" ]]; then
     while IFS= read -r pkg; do

@@ -171,6 +171,10 @@ pgmon은 수집 데이터를 저장하기 위해 PostgreSQL DB를 하나 사용�
 
 ▶ pg_stat_statements extension 설치 (Statement 화면 필수)
 
+  ※ pg_project 의 postgresql_install.sh 로 설치한 DB 는 shared_preload_libraries
+     등록 + CREATE EXTENSION 까지 기본 적용돼 있어 이 단계가 필요 없습니다.
+     (그 외 방법으로 설치한 DB 만 아래 절차 수행)
+
   대상 DB의 postgresql.conf:
     shared_preload_libraries = 'pg_stat_statements'
 

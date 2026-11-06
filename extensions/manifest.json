@@ -74,6 +74,16 @@
       ],
       "note": "pg_tune_ai verify/tune 필수. 1.4.1 = PG 16 빌드 확인. PG18 은 상위 릴리스 태그로 교체 필요할 수 있음."
     },
+    "pgvector": {
+      "description": "벡터 타입 / 유사도 검색 (HNSW, IVFFlat 인덱스)",
+      "source": "git",
+      "repo": "pgvector/pgvector",
+      "git_ref": "v0.8.7",
+      "build": "pgxs",
+      "make_args": "OPTFLAGS=",
+      "used_by": [],
+      "note": "shared_preload_libraries 불필요. 사용할 DB 에서 CREATE EXTENSION vector; (extension 이름은 vector). 기본 빌드가 -march=native(빌드 서버 CPU 전용)라 HA 에서 다른 서버로 복사하면 Illegal instruction 위험 → OPTFLAGS= 로 범용 빌드."
+    },
     "pg_qualstats": {
       "description": "WHERE 절 술어(predicate) 선택도 통계 — pg_tune_ai 인덱스 후보 도출",
       "source": "disabled",
@@ -112,5 +122,6 @@
       "used_by": [],
       "note": "받으려면 source 를 git 으로. shared_preload_libraries 등록 필요."
     }
-  }
+  },
+  "_make_args": "(선택) 항목별 \"make_args\": PGXS make 에 추가로 넘길 인자. 예) pgvector 의 OPTFLAGS= (CPU 전용 최적화 끄기)"
 }

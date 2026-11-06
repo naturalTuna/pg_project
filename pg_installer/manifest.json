@@ -23,6 +23,9 @@
       "libxslt-devel",
       "pkgconf-pkg-config",
       "ncurses-devel",
+      "lz4-devel",
+      "libzstd-devel",
+      "libuuid-devel",
       "wget",
       "tar",
       "gzip",
@@ -31,6 +34,12 @@
       "glibc-langpack-ko",
       "gettext",
       "glibc-langpack-en"
-    ]
+    ],
+    "rpm_by_major": {
+      "_comment": "PG 메이저 버전 이상일 때 추가로 받는 rpm (키 = 최소 메이저). 저장소에 없으면 건너뜀",
+      "18": [
+        "liburing-devel"
+      ]
+    }
   }
 }
