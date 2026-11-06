@@ -26,9 +26,15 @@ pg_project/
 │   ├── collector/collect.sh    ← 백그라운드 수집 데몬
 │   ├── sql/init.sql            ← 저장소 DB(pgmon) 스키마
 │   └── manifest.json           ← pgmon에 필요한 rpm 목록
-└── extensions/
-    └── manifest.json           ← extension 카탈로그 (git 소스 다운로드 대상 관리)
+├── extensions/
+│   └── manifest.json           ← extension 카탈로그 (git 소스 다운로드 대상 관리)
+└── docs/
+    ├── HA_아키텍처_가이드.txt    ← 3노드 Patroni + etcd 구성 / failover 동작
+    ├── patroni_운영가이드.txt    ← patronictl 운영 명령 모음
+    └── pgmon_가이드.txt          ← pgmon 설치 / 화면별 사용법 / 트러블슈팅
 ```
+
+> 이전 버전 레포 `naturalTuna/postgresql` 의 가이드를 옮겨와 현재 코드 기준으로 갱신했습니다.
 
 `pg_download.sh` 실행 후 생성되는 결과물:
 
