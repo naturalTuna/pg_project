@@ -171,12 +171,12 @@ ui_prompt() {
         IFS= read -r -s -n2 -t 0.1 rest || true
         if [[ -z "$rest" ]]; then
             # 순수 ESC
-            eval "$varname='__ESC__'"
+            printf -v "$varname" '%s' '__ESC__'
             printf "\n"
             return
         fi
         # 방향키 등 무시
-        eval "$varname=''"
+        printf -v "$varname" '%s' ''
         printf "\n"
         return
     fi
@@ -192,9 +192,9 @@ ui_prompt() {
     fi
 
     if [[ -z "$line" && -n "$default" ]]; then
-        eval "$varname='$default'"
+        printf -v "$varname" '%s' "$default"
     else
-        eval "$varname='$line'"
+        printf -v "$varname" '%s' "$line"
     fi
 }
 

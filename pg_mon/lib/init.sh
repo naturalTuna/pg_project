@@ -15,33 +15,28 @@ conf_load() {
 # ── conf 저장 ─────────────────────────────────────────────────
 conf_save() {
     mkdir -p "$(dirname "$CONF_FILE")"
-    cat > "$CONF_FILE" <<EOF
-# pgmon configuration — auto generated $(date '+%Y-%m-%d %H:%M:%S')
+    # 값은 printf %q 로 셸 이스케이프해서 저장한다
+    # (패스워드에 " $ ` 등이 있어도 source 시 깨지지 않도록)
+    {
+        printf '# pgmon configuration — auto generated %s\n\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+        printf '# ── 모니터링 저장소 DB (pgmon 자체 DB) ──────────────────────\n'
+        printf 'REPO_HOST=%q\n'   "${REPO_HOST}"
+        printf 'REPO_PORT=%q\n'   "${REPO_PORT}"
+        printf 'REPO_DBNAME=%q\n' "${REPO_DBNAME}"
+        printf 'REPO_USER=%q\n'   "${REPO_USER}"
+        printf 'REPO_PASS=%q\n\n' "${REPO_PASS}"
+        printf '# ── 등록된 대상 DB 수 ────────────────────────────────────────\n'
+        printf 'TARGET_COUNT=%q\n' "${TARGET_COUNT:-0}"
 
-# ── 모니터링 저장소 DB (pgmon 자체 DB) ──────────────────────
-REPO_HOST="${REPO_HOST}"
-REPO_PORT="${REPO_PORT}"
-REPO_DBNAME="${REPO_DBNAME}"
-REPO_USER="${REPO_USER}"
-REPO_PASS="${REPO_PASS}"
-
-# ── 등록된 대상 DB 수 ────────────────────────────────────────
-TARGET_COUNT="${TARGET_COUNT:-0}"
-EOF
-
-    for i in $(seq 1 "${TARGET_COUNT:-0}"); do
-        cat >> "$CONF_FILE" <<EOF
-
-# ── 대상 DB #${i} ──────────────────────────────────────────
-TARGET_${i}_NICKNAME="$(_pgmon_k1="TARGET_${i}_NICKNAME"; echo "${!_pgmon_k1}")"
-TARGET_${i}_HOST="$(_pgmon_k1="TARGET_${i}_HOST"; echo "${!_pgmon_k1}")"
-TARGET_${i}_PORT="$(_pgmon_k1="TARGET_${i}_PORT"; echo "${!_pgmon_k1}")"
-TARGET_${i}_DBNAME="$(_pgmon_k1="TARGET_${i}_DBNAME"; echo "${!_pgmon_k1}")"
-TARGET_${i}_USER="$(_pgmon_k1="TARGET_${i}_USER"; echo "${!_pgmon_k1}")"
-TARGET_${i}_PASS="$(_pgmon_k1="TARGET_${i}_PASS"; echo "${!_pgmon_k1}")"
-TARGET_${i}_RETENTION="$(_pgmon_k1="TARGET_${i}_RETENTION"; echo "${!_pgmon_k1}")"
-EOF
-    done
+        local i key var
+        for i in $(seq 1 "${TARGET_COUNT:-0}"); do
+            printf '\n# ── 대상 DB #%s ──────────────────────────────────────────\n' "$i"
+            for key in NICKNAME HOST PORT DBNAME USER PASS RETENTION; do
+                var="TARGET_${i}_${key}"
+                printf '%s=%q\n' "$var" "${!var:-}"
+            done
+        done
+    } > "$CONF_FILE"
     chmod 600 "$CONF_FILE"
 }
 
@@ -243,8 +238,8 @@ SQL
             printf "  ${C_BGREEN}✔ pgmon_monitor role 생성/권한 부여 완료${C_RESET}\n"
 
             # conf에 모니터링 전용 유저로 업데이트
-            eval "TARGET_${idx}_USER='${mon_user}'"
-            eval "TARGET_${idx}_PASS='${mon_pass}'"
+            printf -v "TARGET_${idx}_USER" '%s' "${mon_user}"
+            printf -v "TARGET_${idx}_PASS" '%s' "${mon_pass}"
 
             # 연결 재확인
             printf "  ${C_DIM}모니터링 유저로 연결 재확인 중...${C_RESET}"
@@ -276,8 +271,8 @@ SQL
         printf "  ${C_DIM}연결 확인 중...${C_RESET}"
         if test_connection "$host" "$port" "$dbname" "$mon_user" "$mon_pass"; then
             printf "\r  ${C_BGREEN}✔ 연결 확인됨${C_RESET}              \n"
-            eval "TARGET_${idx}_USER='${mon_user}'"
-            eval "TARGET_${idx}_PASS='${mon_pass}'"
+            printf -v "TARGET_${idx}_USER" '%s' "${mon_user}"
+            printf -v "TARGET_${idx}_PASS" '%s' "${mon_pass}"
 
             # 권한 체크 (pg_monitor 멤버인지)
             local has_monitor
@@ -311,31 +306,31 @@ input_target_db() {
 
     ui_prompt "닉네임 (영문, 공백없이)" nick ""
     [[ "$nick" == "__ESC__" ]] && return 1
-    eval "${prefix}_NICKNAME='${nick}'"
+    printf -v "${prefix}_NICKNAME" '%s' "${nick}"
 
     ui_prompt "호스트 / IP" host "127.0.0.1"
     [[ "$host" == "__ESC__" ]] && return 1
-    eval "${prefix}_HOST='${host}'"
+    printf -v "${prefix}_HOST" '%s' "${host}"
 
     ui_prompt "포트" port "5432"
     [[ "$port" == "__ESC__" ]] && return 1
-    eval "${prefix}_PORT='${port}'"
+    printf -v "${prefix}_PORT" '%s' "${port}"
 
     ui_prompt "DB명" dbname "postgres"
     [[ "$dbname" == "__ESC__" ]] && return 1
-    eval "${prefix}_DBNAME='${dbname}'"
+    printf -v "${prefix}_DBNAME" '%s' "${dbname}"
 
     ui_prompt "접속 유저" user "postgres"
     [[ "$user" == "__ESC__" ]] && return 1
-    eval "${prefix}_USER='${user}'"
+    printf -v "${prefix}_USER" '%s' "${user}"
 
     printf "  ${C_BCYAN}패스워드${C_RESET}: "
     read -rs pass; printf "\n"
-    eval "${prefix}_PASS='${pass}'"
+    printf -v "${prefix}_PASS" '%s' "${pass}"
 
     ui_prompt "데이터 보관 주기 (일)" retention "15"
     [[ "$retention" == "__ESC__" ]] && return 1
-    eval "${prefix}_RETENTION='${retention}'"
+    printf -v "${prefix}_RETENTION" '%s' "${retention}"
 
     # 연결 테스트
     printf "\n  ${C_DIM}연결 테스트 중...${C_RESET}"
@@ -352,6 +347,7 @@ input_target_db() {
         printf "\r  ${C_BRED}✘ 연결 실패 — 정보를 확인하세요${C_RESET}\n"
         if ui_confirm "다시 입력하시겠습니까?"; then
             input_target_db "$idx"
+            return $?
         fi
         return 1
     fi
@@ -430,7 +426,7 @@ VALUES
 ON CONFLICT (nickname) DO UPDATE SET
     host=EXCLUDED.host, port=EXCLUDED.port, dbname=EXCLUDED.dbname,
     username=EXCLUDED.username, password=EXCLUDED.password,
-    retention_days=EXCLUDED.retention_days, updated_at=now();
+    retention_days=EXCLUDED.retention_days, active=true, updated_at=now();
 
 -- 기본 수집 설정 삽입
 INSERT INTO pgmon.collection_config (db_id, metric_name, interval_sec)
@@ -480,11 +476,14 @@ init_modify_menu() {
         case "${sel,,}" in
             a)
                 TARGET_COUNT=$(( ${TARGET_COUNT:-0} + 1 ))
-                input_target_db "$TARGET_COUNT" && {
+                if input_target_db "$TARGET_COUNT"; then
                     conf_save
                     install_extensions "$TARGET_COUNT"
                     _sync_targets_to_repo
-                }
+                else
+                    # 등록 취소/실패 시 빈 항목이 남지 않도록 카운트 원복
+                    TARGET_COUNT=$(( TARGET_COUNT - 1 ))
+                fi
                 ;;
             e)
                 ui_prompt "수정할 번호" sel ""
@@ -522,7 +521,7 @@ _remove_target_from_conf() {
         for key in NICKNAME HOST PORT DBNAME USER PASS RETENTION; do
             local src="TARGET_${i}_${key}"
             local dst="TARGET_${j}_${key}"
-            eval "$dst='${!src}'"
+            printf -v "$dst" '%s' "${!src}"
         done
         (( j++ ))
     done

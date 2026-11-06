@@ -307,11 +307,19 @@ if [[ -f "${PG_DEST}" ]]; then
     info "이미 존재합니다: ${PG_DEST} (스킵)"
 else
     info "다운로드 중: ${PG_URL}"
+    # .part 로 받은 뒤 검증 후 이름 변경 — 실패 시 깨진 파일이 남아
+    # 다음 실행에서 "이미 존재(스킵)" 처리되는 것을 방지
+    rm -f "${PG_DEST}.part"
     if command -v wget &>/dev/null; then
-        wget -q --show-progress -O "${PG_DEST}" "${PG_URL}"
+        wget -q --show-progress -O "${PG_DEST}.part" "${PG_URL}" \
+            || { rm -f "${PG_DEST}.part"; error "PostgreSQL ${PG_VERSION} 소스 다운로드 실패 (버전 확인): ${PG_URL}"; }
     else
-        curl -L --progress-bar -o "${PG_DEST}" "${PG_URL}"
+        curl -fL --progress-bar -o "${PG_DEST}.part" "${PG_URL}" \
+            || { rm -f "${PG_DEST}.part"; error "PostgreSQL ${PG_VERSION} 소스 다운로드 실패 (버전 확인): ${PG_URL}"; }
     fi
+    tar -tzf "${PG_DEST}.part" &>/dev/null \
+        || { rm -f "${PG_DEST}.part"; error "받은 파일이 올바른 tar.gz 가 아닙니다: ${PG_URL}"; }
+    mv "${PG_DEST}.part" "${PG_DEST}"
     info "PostgreSQL 소스 다운로드 완료 → ${PG_DEST}"
 fi
 
@@ -386,11 +394,15 @@ if [[ "${INSTALL_MODE}" == "ha" ]]; then
         info "etcd 이미 존재 (스킵)"
     else
         info "etcd 다운로드 중..."
+        rm -f "${ETCD_DEST}.part"
         if command -v wget &>/dev/null; then
-            wget -q --show-progress -O "${ETCD_DEST}" "${ETCD_URL}"
+            wget -q --show-progress -O "${ETCD_DEST}.part" "${ETCD_URL}" \
+                || { rm -f "${ETCD_DEST}.part"; error "etcd 다운로드 실패: ${ETCD_URL}"; }
         else
-            curl -L --progress-bar -o "${ETCD_DEST}" "${ETCD_URL}"
+            curl -fL --progress-bar -o "${ETCD_DEST}.part" "${ETCD_URL}" \
+                || { rm -f "${ETCD_DEST}.part"; error "etcd 다운로드 실패: ${ETCD_URL}"; }
         fi
+        mv "${ETCD_DEST}.part" "${ETCD_DEST}"
         info "etcd 다운로드 완료 → ${ETCD_DEST}"
     fi
 

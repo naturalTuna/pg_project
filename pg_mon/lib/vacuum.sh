@@ -90,23 +90,13 @@ LIMIT 30")
 
             rows=$(_psql "
 SELECT
-    schemaname||'.'||relname,
-    age(relfrozenxid),
-    current_setting('autovacuum_freeze_max_age')::bigint,
-    round(age(relfrozenxid)*100.0 /
-          current_setting('autovacuum_freeze_max_age')::bigint, 1)
-FROM pg_stat_user_tables
-JOIN pg_class ON relname=relname
-ORDER BY age(relfrozenxid) DESC LIMIT 20" 2>/dev/null || \
-            _psql "
-SELECT
-    schemaname||'.'||relname,
+    st.schemaname||'.'||st.relname,
     age(c.relfrozenxid),
-    200000000,
-    round(age(c.relfrozenxid)*100.0/200000000,1)
+    current_setting('autovacuum_freeze_max_age')::bigint,
+    round(age(c.relfrozenxid)*100.0 /
+          current_setting('autovacuum_freeze_max_age')::bigint, 1)
 FROM pg_stat_user_tables st
-JOIN pg_class c ON c.relname=st.relname
-  AND c.relnamespace=(SELECT oid FROM pg_namespace WHERE nspname=st.schemaname)
+JOIN pg_class c ON c.oid = st.relid
 ORDER BY age(c.relfrozenxid) DESC LIMIT 20")
 
             while IFS='|' read -r tbl age max_age risk; do

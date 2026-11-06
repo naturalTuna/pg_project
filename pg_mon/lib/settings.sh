@@ -112,7 +112,8 @@ WHERE db_id=${db_id:-0}" > /dev/null
                         printf "\n  ${C_BYELLOW}Collector 중지됨${C_RESET}\n"; sleep 1
                     fi
                 else
-                    bash "${PGMON_HOME}/collector/collect.sh" "$idx" &
+                    bash "${PGMON_HOME}/collector/collect.sh" "$idx" \
+                        >> "${PGMON_HOME}/conf/collector_${nick}.log" 2>&1 &
                     echo $! > "${PGMON_HOME}/conf/.collector_${idx}.pid"
                     printf "\n  ${C_BGREEN}Collector 시작됨${C_RESET}\n"; sleep 1
                 fi

@@ -75,7 +75,7 @@ statement_run() {
         local rows
         rows=$(_psql "
 SELECT
-    row_number() OVER () AS rn,
+    row_number() OVER (ORDER BY ${order_clause}) AS rn,
     calls,
     round(mean_exec_time::numeric,2),
     round(total_exec_time::numeric,2),

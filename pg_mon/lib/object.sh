@@ -43,10 +43,10 @@ object_run() {
 
             _psql "
 SELECT
-    schemaname||'.'||tablename,
-    pg_total_relation_size(schemaname||'.'||tablename),
-    pg_relation_size(schemaname||'.'||tablename),
-    pg_indexes_size(schemaname||'.'||tablename),
+    schemaname||'.'||relname,
+    pg_total_relation_size(relid) AS total_bytes,
+    pg_relation_size(relid),
+    pg_indexes_size(relid),
     seq_scan,
     idx_scan,
     n_dead_tup

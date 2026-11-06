@@ -3,7 +3,9 @@
 # collector/collect.sh  – 백그라운드 수집 데몬
 # 사용법: collect.sh <TARGET_IDX>
 # =============================================================
-set -euo pipefail
+# set -e 사용하지 않음: 대상 DB 일시 장애/쿼리 실패 한 번에 데몬 전체가
+# 조용히 죽지 않도록 한다 (pgmon.sh 와 동일 정책)
+set -uo pipefail
 
 TARGET_IDX="${1:?TARGET_IDX 필요}"
 PGMON_HOME="${PGMON_HOME:-$(cd "$(dirname "$0")/.." && pwd)}"
@@ -43,9 +45,13 @@ DB_ID=$(_rpsql "SELECT db_id FROM pgmon.registered_db WHERE nickname='${NICK}'")
 get_interval() {
     local metric=$1
     local sec
-    sec=$(_rpsql "
-SELECT interval_sec FROM pgmon.collection_config
-WHERE db_id=${DB_ID} AND metric_name='${metric}' AND enabled=true")
+    local row ena
+    row=$(_rpsql "
+SELECT interval_sec, enabled FROM pgmon.collection_config
+WHERE db_id=${DB_ID} AND metric_name='${metric}'")
+    IFS='|' read -r sec ena <<< "${row}"
+    # enabled=false 면 0 반환 → 메인 루프에서 수집 생략
+    [[ "${ena}" == "f" ]] && { echo 0; return; }
     echo "${sec:-60}"
 }
 
@@ -420,6 +426,7 @@ while true; do
     # 각 메트릭별 수집 주기 체크
     for metric in dashboard session statement vacuum lock; do
         local_interval=$(get_interval "$metric")
+        [[ "${local_interval}" -le 0 ]] && continue
         elapsed=$(( NOW - ${LAST_RUN[$metric]:-0} ))
         if [[ $elapsed -ge $local_interval ]]; then
             case "$metric" in
