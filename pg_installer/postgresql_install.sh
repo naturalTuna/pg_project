@@ -31,6 +31,79 @@ phase() { local _txt="$*"
           echo -e "${CYAN}${BOLD}  ${_line}${NC}"; }
 div()   { echo -e "  ─────────────────────────────────────────────"; }
 
+# ============================================================
+#  무인 설치 (응답 파일)
+#    bash postgresql_install.sh -c install.conf        # 파일에 있는 항목만 자동 입력, 나머지는 질문
+#    bash postgresql_install.sh -c install.conf -y     # 완전 무인: 없는 항목은 기본값
+#  응답 파일 형식: 변수명=값  (install.conf.sample 참고)
+# ============================================================
+INSTALL_CFG="" ; UNATTENDED=false
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -c|--config) INSTALL_CFG="$2"; shift 2 ;;
+        -y|--yes)    UNATTENDED=true; shift ;;
+        -h|--help)
+            echo "사용법: bash $0 [-c 응답파일] [-y]"
+            echo "  -c, --config FILE  응답 파일의 값으로 질문에 자동 응답"
+            echo "  -y, --yes          응답 파일에 없는 질문은 기본값 사용 (완전 무인)"
+            exit 0 ;;
+        *) echo "알 수 없는 옵션: $1 (도움말: -h)"; exit 1 ;;
+    esac
+done
+
+declare -A CFG=()
+if [[ -n "${INSTALL_CFG}" ]]; then
+    [[ -f "${INSTALL_CFG}" ]] || error "응답 파일이 없습니다: ${INSTALL_CFG}"
+    while IFS= builtin read -r _line || [[ -n "${_line}" ]]; do
+        _line="${_line%%$'\r'}"
+        [[ "${_line}" =~ ^[[:space:]]*(#|$) ]] && continue
+        if [[ "${_line}" =~ ^[[:space:]]*([A-Z_][A-Z0-9_]*)=(.*)$ ]]; then
+            _k="${BASH_REMATCH[1]}"; _v="${BASH_REMATCH[2]}"
+            if [[ "${_v}" =~ ^\"([^\"]*)\" || "${_v}" =~ ^\'([^\']*)\' ]]; then
+                _v="${BASH_REMATCH[1]}"                    # 따옴표 값은 그대로 (# 포함 가능)
+            else
+                _v="${_v%%[[:space:]]#*}"                  # 뒤쪽 주석 제거
+                _v="${_v%"${_v##*[![:space:]]}"}"          # 뒤 공백 제거
+            fi
+            CFG["${_k}"]="${_v}"
+        fi
+    done < "${INSTALL_CFG}"
+    _perm=$(stat -c '%a' "${INSTALL_CFG}" 2>/dev/null || echo "")
+    [[ -n "${CFG[REPL_PASS_HA]:-}" && "${_perm}" != "600" && "${_perm}" != "400" ]] && \
+        warn "응답 파일에 패스워드가 있습니다. 권한을 600 으로 바꾸세요: chmod 600 ${INSTALL_CFG}"
+    info "응답 파일 사용: ${INSTALL_CFG} (${#CFG[@]}개 항목)$([[ ${UNATTENDED} == true ]] && echo ' / 무인 모드')"
+elif [[ "${UNATTENDED}" == true ]]; then
+    info "무인 모드: 모든 질문에 기본값 사용"
+fi
+
+# read -rp / -rsp 프롬프트를 가로채서 응답 파일 값(또는 무인 모드 기본값)으로 채운다.
+# 프롬프트가 없는 read 나 응답 파일 미사용 시에는 원래 read 와 동일하게 동작.
+read() {
+    if [[ -z "${INSTALL_CFG}" && "${UNATTENDED}" != true ]]; then
+        builtin read "$@"; return
+    fi
+    local _args=("$@") _var="${!#}" _prompt="" _secret=false _i
+    for (( _i=0; _i<${#_args[@]}; _i++ )); do
+        case "${_args[$_i]}" in
+            -*p) _prompt="${_args[$((_i+1))]}"
+                 [[ "${_args[$_i]}" == *s* ]] && _secret=true ;;
+        esac
+    done
+    [[ -z "${_prompt}" ]] && { builtin read "$@"; return; }
+
+    local _show
+    if [[ -v "CFG[${_var}]" ]]; then
+        printf -v "${_var}" '%s' "${CFG[${_var}]}"
+        _show="${CFG[${_var}]}"; [[ "${_secret}" == true ]] && _show="********"
+        echo "${_prompt}${_show}  (응답파일)"
+    elif [[ "${UNATTENDED}" == true ]]; then
+        printf -v "${_var}" '%s' ""
+        echo "${_prompt}(기본값)"
+    else
+        builtin read "$@"
+    fi
+}
+
 # ── 스크립트 위치 기준 경로 ───────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 INSTALLER_DIR="${SCRIPT_DIR}/installer"
@@ -150,7 +223,7 @@ fi
 #  STEP 3. HA 모드 입력
 # ============================================================
 HA_ETCD_HOST="" ; HA_PRIMARY_HOST="" ; HA_STANDBY_HOST=""
-HA_SSH_PORT="" ; CLUSTER_NAME=""
+HA_SSH_PORT="" ; CLUSTER_NAME="" ; ETCD_NODES=1
 REPL_USER_HA="" ; REPL_PASS_HA=""
 PRI_CPU="" ; PRI_MEM_GB=""
 SBY_CPU="" ; SBY_MEM_GB=""
@@ -177,6 +250,15 @@ if [[ "${INSTALL_MODE}" == "ha" ]]; then
 
     read -rp "  SSH 포트 [22]: " HA_SSH_PORT
     HA_SSH_PORT="${HA_SSH_PORT:-22}"
+
+    echo "  etcd 구성:"
+    echo "    1) 단일 노드  — etcd 서버 1대 (etcd 서버 장애 시 failover 불가)"
+    echo "    2) 3노드      — etcd 서버 + Primary + Standby 에 etcd 설치 (권장)"
+    read -rp "  선택 [1]: " ETCD_MODE_SEL
+    case "${ETCD_MODE_SEL:-1}" in
+        2) ETCD_NODES=3 ;;
+        *) ETCD_NODES=1 ;;
+    esac
 
     read -rp "  PostgreSQL Port [5432]: " PG_PORT
     PG_PORT="${PG_PORT:-5432}"
@@ -305,7 +387,7 @@ echo -e "${BOLD}  ║${NC}  Memory     : ${MEM_GB} GB"
 echo -e "${BOLD}  ║${NC}  Port       : ${PG_PORT}"
 else
 echo -e "${BOLD}  ║${NC}  클러스터   : ${CLUSTER_NAME}"
-echo -e "${BOLD}  ║${NC}  etcd 서버  : ${HA_ETCD_HOST}"
+echo -e "${BOLD}  ║${NC}  etcd 서버  : ${HA_ETCD_HOST}  (etcd ${ETCD_NODES}노드)"
 echo -e "${BOLD}  ║${NC}  Primary    : ${HA_PRIMARY_HOST}  (CPU:${PRI_CPU} / MEM:${PRI_MEM_GB}GB)"
 echo -e "${BOLD}  ║${NC}  Standby    : ${HA_STANDBY_HOST}  (CPU:${SBY_CPU} / MEM:${SBY_MEM_GB}GB)"
 echo -e "${BOLD}  ║${NC}  SSH Port   : ${HA_SSH_PORT}"
@@ -336,6 +418,7 @@ cat > "${LOG_INSTALL}" <<EOF
   PostgreSQL Install Log
   Started : $(date '+%Y-%m-%d %H:%M:%S')
   Mode    : ${INSTALL_MODE}
+  Config  : ${INSTALL_CFG:-대화형}$([[ ${UNATTENDED} == true ]] && echo ' (무인)')
   Version : ${PG_VERSION}
 ============================================================
 EOF
@@ -485,6 +568,50 @@ fn_build_pg_local() {
     popd > /dev/null
     rm -rf "${TMP}"
     info "PostgreSQL 빌드 및 설치 완료 → ${ENGINE_PATH} (contrib 포함)"
+}
+
+# ── Extension 소스 빌드 함수 (로컬) ──────────────────────────
+#  pg_download.sh 가 installer/extensions/ 에 넣어둔 *.tar.gz (GitHub 태그
+#  tarball) 를 PGXS 로 빌드해서 엔진 경로에 설치한다.
+#  HA 모드에서는 etcd 서버에서 빌드한 엔진을 그대로 scp 하므로 함께 배포된다.
+fn_build_extensions_local() {
+    local BUILD_CPU="${1:-${CPU_CORES}}"
+    local EXT_SRC="${INSTALLER_DIR}/extensions"
+    local PG_CONFIG_BIN="${ENGINE_PATH}/bin/pg_config"
+    local _tars=() _t _name _dir _ok=0 _fail=0 _preload=()
+
+    shopt -s nullglob
+    _tars=("${EXT_SRC}"/*.tar.gz)
+    shopt -u nullglob
+    [[ ${#_tars[@]} -eq 0 ]] && return 0
+
+    info "extension 소스 빌드 중 (${#_tars[@]}개, PGXS)..."
+    for _t in "${_tars[@]}"; do
+        _name=$(basename "${_t}" .tar.gz)
+        _dir=$(mktemp -d)
+        if tar -xzf "${_t}" -C "${_dir}" --strip-components=1 >> "${LOG_INSTALL}" 2>&1 && \
+           ( cd "${_dir}" && \
+             make USE_PGXS=1 PG_CONFIG="${PG_CONFIG_BIN}" -j"${BUILD_CPU}" && \
+             make USE_PGXS=1 PG_CONFIG="${PG_CONFIG_BIN}" install ) >> "${LOG_INSTALL}" 2>&1; then
+            info "  ✔ ${_name}"
+            _ok=$(( _ok + 1 ))
+            # shared_preload_libraries 등록이 필요한 extension 안내용
+            case "${_name}" in
+                pg_cron*|pgaudit*|pg_stat_kcache*|pg_qualstats*|pg_wait_sampling*|pg_stat_monitor*)
+                    _preload+=("${_name%%-*}") ;;
+            esac
+        else
+            warn "  ✘ ${_name} 빌드 실패 — 로그: ${LOG_INSTALL}"
+            _fail=$(( _fail + 1 ))
+        fi
+        rm -rf "${_dir}"
+    done
+    info "extension 빌드 완료: 성공 ${_ok} / 실패 ${_fail}"
+    if [[ ${#_preload[@]} -gt 0 ]]; then
+        warn "아래 extension 은 shared_preload_libraries 등록 + 재시작 후 CREATE EXTENSION 하세요:"
+        warn "  ${_preload[*]}"
+    fi
+    return 0
 }
 
 # ── 디렉토리 생성 함수 (로컬) ────────────────────────────────
@@ -904,6 +1031,7 @@ if [[ "${INSTALL_MODE}" == "single" ]]; then
     fn_install_pkg_local
     fn_create_dirs_local
     fn_build_pg_local "${CPU_CORES}"
+    fn_build_extensions_local "${CPU_CORES}"
 
     # 환경변수 설정
     POSTGRESRC="${HOME_DIR}/.postgresrc"
@@ -1099,33 +1227,37 @@ if [[ "${INSTALL_MODE}" == "ha" ]]; then
     phase "PHASE 1  |  etcd 설치  (로컬: ${HA_ETCD_HOST})"
 
     ETCD_INSTALL_DIR="/usr/local/etcd"
-    sudo mkdir -p "${ETCD_INSTALL_DIR}" /etc/etcd
 
-    # 재실행 보호: 기존 etcd 데이터 클린 (남아있으면 클러스터 ID 충돌)
-    sudo systemctl stop etcd 2>/dev/null || true
-    sudo rm -rf /var/lib/etcd
-    sudo mkdir -p /var/lib/etcd
+    # ── 노드 목록 (이름|IP) ──────────────────────────────────
+    #   1노드: etcd 서버만 / 3노드: etcd 서버 + Primary + Standby
+    if [[ "${ETCD_NODES}" == "3" ]]; then
+        ETCD_MEMBERS=("etcd1|${HA_ETCD_IP}" "etcd2|${HA_PRIMARY_IP}" "etcd3|${HA_STANDBY_IP}")
+    else
+        ETCD_MEMBERS=("etcd1|${HA_ETCD_IP}")
+    fi
+    ETCD_INITIAL_CLUSTER=""
+    ETCD_ENDPOINTS=""
+    for _m in "${ETCD_MEMBERS[@]}"; do
+        ETCD_INITIAL_CLUSTER+="${ETCD_INITIAL_CLUSTER:+,}${_m%%|*}=http://${_m##*|}:2380"
+        ETCD_ENDPOINTS+="${ETCD_ENDPOINTS:+,}http://${_m##*|}:2379"
+    done
 
-    sudo tar -zxf "${ETCD_TARBALL}" -C "${ETCD_INSTALL_DIR}" \
-        --strip-components=1 >> "${HA_LOG}" 2>&1
-    sudo ln -sf "${ETCD_INSTALL_DIR}/etcd"    /usr/local/bin/etcd
-    sudo ln -sf "${ETCD_INSTALL_DIR}/etcdctl" /usr/local/bin/etcdctl
-    info "etcd 바이너리 설치 완료"
-
-    sudo bash -c "cat > /etc/etcd/etcd.conf" <<ETCDCONF
-name: etcd-node
+    # etcd.conf 내용 출력 (인자: 노드이름 IP)
+    fn_etcd_conf() {
+        cat <<ETCDCONF
+name: $1
 data-dir: /var/lib/etcd
-listen-peer-urls: http://${HA_ETCD_IP}:2380
-listen-client-urls: http://${HA_ETCD_IP}:2379,http://127.0.0.1:2379
-initial-advertise-peer-urls: http://${HA_ETCD_HOST}:2380
-advertise-client-urls: http://${HA_ETCD_HOST}:2379
-initial-cluster: etcd-node=http://${HA_ETCD_HOST}:2380
+listen-peer-urls: http://$2:2380
+listen-client-urls: http://$2:2379,http://127.0.0.1:2379
+initial-advertise-peer-urls: http://$2:2380
+advertise-client-urls: http://$2:2379
+initial-cluster: ${ETCD_INITIAL_CLUSTER}
 initial-cluster-token: ${CLUSTER_NAME}-etcd
 initial-cluster-state: new
 ETCDCONF
+    }
 
-    sudo bash -c "cat > /etc/systemd/system/etcd.service" <<ETCDSVC
-[Unit]
+    ETCD_SERVICE='[Unit]
 Description=etcd key-value store
 After=network.target
 
@@ -1137,16 +1269,78 @@ RestartSec=5
 LimitNOFILE=65536
 
 [Install]
-WantedBy=multi-user.target
-ETCDSVC
+WantedBy=multi-user.target'
 
+    # ── (1) 로컬: etcd 서버 ──────────────────────────────────
+    sudo mkdir -p "${ETCD_INSTALL_DIR}" /etc/etcd
+    # 재실행 보호: 기존 etcd 데이터 클린 (남아있으면 클러스터 ID 충돌)
+    sudo systemctl stop etcd 2>/dev/null || true
+    sudo rm -rf /var/lib/etcd
+    sudo mkdir -p /var/lib/etcd
+    sudo tar -zxf "${ETCD_TARBALL}" -C "${ETCD_INSTALL_DIR}" \
+        --strip-components=1 >> "${HA_LOG}" 2>&1
+    sudo ln -sf "${ETCD_INSTALL_DIR}/etcd"    /usr/local/bin/etcd
+    sudo ln -sf "${ETCD_INSTALL_DIR}/etcdctl" /usr/local/bin/etcdctl
+    fn_etcd_conf "etcd1" "${HA_ETCD_IP}" | sudo tee /etc/etcd/etcd.conf > /dev/null
+    echo "${ETCD_SERVICE}" | sudo tee /etc/systemd/system/etcd.service > /dev/null
     sudo systemctl daemon-reload
     sudo systemctl enable etcd >> "${HA_LOG}" 2>&1
-    sudo systemctl start  etcd
-    sleep 3
-    etcdctl --endpoints="http://${HA_ETCD_HOST}:2379" endpoint health \
-        && info "etcd 정상 기동 확인" \
-        || error "etcd 기동 실패. 확인: journalctl -u etcd"
+    info "[etcd1] ${HA_ETCD_HOST} (${HA_ETCD_IP}) 설치 완료"
+
+    # ── (2) 원격: Primary / Standby (3노드일 때만) ───────────
+    if [[ "${ETCD_NODES}" == "3" ]]; then
+        for _m in "etcd2|${HA_PRIMARY_HOST}|${HA_PRIMARY_IP}" \
+                  "etcd3|${HA_STANDBY_HOST}|${HA_STANDBY_IP}"; do
+            IFS='|' read -r _en _eh _eip <<< "${_m}"
+            info "[${_en}] ${_eh} (${_eip}) etcd 설치 중..."
+            scp ${SCP_OPTS} "${ETCD_TARBALL}" "${_eh}:/tmp/etcd.tar.gz" >> "${HA_LOG}" 2>&1
+            ssh ${SSH_OPTS} "${_eh}" bash >> "${HA_LOG}" 2>&1 <<RETCD
+set -e
+sudo systemctl stop etcd 2>/dev/null || true
+sudo rm -rf /var/lib/etcd
+sudo mkdir -p /var/lib/etcd ${ETCD_INSTALL_DIR} /etc/etcd
+sudo tar -zxf /tmp/etcd.tar.gz -C ${ETCD_INSTALL_DIR} --strip-components=1
+rm -f /tmp/etcd.tar.gz
+sudo ln -sf ${ETCD_INSTALL_DIR}/etcd    /usr/local/bin/etcd
+sudo ln -sf ${ETCD_INSTALL_DIR}/etcdctl /usr/local/bin/etcdctl
+sudo tee /etc/etcd/etcd.conf > /dev/null <<'CONF'
+$(fn_etcd_conf "${_en}" "${_eip}")
+CONF
+sudo tee /etc/systemd/system/etcd.service > /dev/null <<'SVC'
+${ETCD_SERVICE}
+SVC
+sudo systemctl daemon-reload
+sudo systemctl enable etcd
+RETCD
+            info "[${_en}] 설치 완료"
+        done
+    fi
+
+    # ── (3) 기동 ─────────────────────────────────────────────
+    #  Type=notify 라서 3노드는 quorum 이 잡힐 때까지 start 가 블록된다
+    #  → 모든 노드를 --no-block 으로 동시에 띄운 뒤 health 로 확인
+    sudo systemctl start --no-block etcd
+    if [[ "${ETCD_NODES}" == "3" ]]; then
+        ssh ${SSH_OPTS} "${HA_PRIMARY_HOST}" "sudo systemctl start --no-block etcd" >> "${HA_LOG}" 2>&1
+        ssh ${SSH_OPTS} "${HA_STANDBY_HOST}" "sudo systemctl start --no-block etcd" >> "${HA_LOG}" 2>&1
+    fi
+
+    _etcd_ok=false
+    for _i in $(seq 1 12); do
+        sleep 5
+        if etcdctl --endpoints="${ETCD_ENDPOINTS}" endpoint health >> "${HA_LOG}" 2>&1; then
+            _etcd_ok=true; break
+        fi
+        info "etcd 클러스터 기동 대기 중... (${_i}/12)"
+    done
+    if [[ "${_etcd_ok}" != true ]]; then
+        etcdctl --endpoints="${ETCD_ENDPOINTS}" endpoint health 2>&1 | sed 's/^/    /' || true
+        error "etcd 기동 실패. 각 노드에서 확인: journalctl -u etcd  (방화벽 2379/2380 포트 확인)"
+    fi
+    info "etcd 정상 기동 확인 (${#ETCD_MEMBERS[@]}노드)"
+    # patroni.yml etcd3.hosts (콤마 구분 host:port)
+    PATRONI_ETCD_HOSTS=$(echo "${ETCD_ENDPOINTS}" | sed 's|http://||g')
+    etcdctl --endpoints="${ETCD_ENDPOINTS}" member list 2>/dev/null | sed 's/^/    /' || true
 
     # ──────────────────────────────────────────────────────────
     #  PHASE 2. etcd 서버에서 PostgreSQL 빌드 (로컬)
@@ -1156,6 +1350,7 @@ ETCDSVC
     fn_install_pkg_local
     mkdir -p "${ENGINE_PATH}/etc"
     fn_build_pg_local "${LOCAL_CPU}"
+    fn_build_extensions_local "${LOCAL_CPU}"
 
     # ──────────────────────────────────────────────────────────
     #  PHASE 3. Primary DB 서버 구성 (원격)
@@ -1238,7 +1433,7 @@ restapi:
   connect_address: ${HA_PRIMARY_HOST}:8008
 
 etcd3:
-  host: ${HA_ETCD_HOST}:2379
+  hosts: ${PATRONI_ETCD_HOSTS}
 
 bootstrap:
   dcs:
@@ -1406,7 +1601,7 @@ restapi:
   connect_address: ${HA_STANDBY_HOST}:8008
 
 etcd3:
-  host: ${HA_ETCD_HOST}:2379
+  hosts: ${PATRONI_ETCD_HOSTS}
 
 bootstrap:
   dcs:
@@ -1710,7 +1905,7 @@ SAPPLY_CONF
     echo -e "${BOLD}  ╔══════════════════════════════════════════════╗${NC}"
     echo -e "${BOLD}  ║           HA 구성 완료!  🎉                  ║${NC}"
     echo -e "${BOLD}  ╠══════════════════════════════════════════════╣${NC}"
-    echo -e "${BOLD}  ║${NC}  etcd      : ${HA_ETCD_HOST}:2379"
+    echo -e "${BOLD}  ║${NC}  etcd      : ${PATRONI_ETCD_HOSTS}"
     echo -e "${BOLD}  ║${NC}  Primary   : ${HA_PRIMARY_HOST}:${PG_PORT}"
     echo -e "${BOLD}  ║${NC}  Standby   : ${HA_STANDBY_HOST}:${PG_PORT}"
     [[ -n "${BACKUP_HOST}" ]] && \

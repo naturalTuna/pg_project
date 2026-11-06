@@ -66,7 +66,7 @@ report_run() {
     db_id=$(_repo_psql "SELECT db_id FROM pgmon.registered_db WHERE nickname='${nick}'")
 
     local period="24h"     # 1h | 6h | 24h | 7d | 30d
-    local view="summary"   # summary | cpu | session | lock | vacuum | statement | alert
+    local view="summary"   # summary | cpu | session | lock | vacuum | repl | growth | statement | alert
 
     while true; do
         local interval_str
@@ -158,6 +158,17 @@ WHERE db_id=${db_id:-0}
   AND fired_at >= now() - interval '${interval_str}'
   AND severity='CRIT'")
             ui_kv "Alert (WARN / CRIT)" "${alert_warn:-0} / ${alert_crit:-0}" 28
+
+            # 복제 지연 / 슬롯 적체 (최대)
+            local repl_max slot_max
+            repl_max=$(_repo_psql "
+SELECT round(max(replay_lag_sec),1) FROM pgmon.snap_replication
+WHERE db_id=${db_id:-0} AND collected_at >= now() - interval '${interval_str}'")
+            slot_max=$(_repo_psql "
+SELECT round(max(retained_bytes)/1048576.0,1) FROM pgmon.snap_repl_slot
+WHERE db_id=${db_id:-0} AND collected_at >= now() - interval '${interval_str}'")
+            ui_kv "복제 지연 최대" "${repl_max:-N/A}s" 28
+            ui_kv "슬롯 WAL 적체 최대" "${slot_max:-N/A} MB" 28
 
             # Dead tuples 추이 (스파크라인)
             ui_section "Dead Tuples 추이"
@@ -302,6 +313,69 @@ LIMIT 30" | while IFS='|' read -r tbl ratio dead_max dead_avg avcnt; do
             ;;
 
         # ────────────────────────────────────────────────────
+        repl)
+            ui_section "복제 지연 추이  (${period}, ${trunc_str} 단위 최대값)"
+            printf "\n"
+            printf "  ${C_BBLUE}%-20s  %-8s  %12s  %14s  %14s${C_RESET}\n" \
+                "Time" "Role" "Max Lag(s)" "Max Lag" "Slot 적체 최대"
+            ui_hline '─' "$C_BBLACK"
+            _repo_psql "
+WITH r AS (
+  SELECT date_trunc('${trunc_str}', collected_at) t, node_role,
+         max(replay_lag_sec) lags, max(lag_bytes) lagb
+  FROM pgmon.snap_replication
+  WHERE db_id=${db_id:-0} AND collected_at >= now() - interval '${interval_str}'
+  GROUP BY 1, 2
+), s AS (
+  SELECT date_trunc('${trunc_str}', collected_at) t, max(retained_bytes) ret
+  FROM pgmon.snap_repl_slot
+  WHERE db_id=${db_id:-0} AND collected_at >= now() - interval '${interval_str}'
+  GROUP BY 1
+)
+SELECT to_char(r.t,'MM-DD HH24:MI'), r.node_role, round(r.lags,1),
+       coalesce(r.lagb,0), coalesce(s.ret,0)
+FROM r LEFT JOIN s USING (t)
+ORDER BY r.t DESC LIMIT 40" | while IFS='|' read -r ts role lags lagb ret; do
+                local c=$C_WHITE
+                [[ $(echo "${lags:-0} > 30"  | bc 2>/dev/null) == "1" ]] && c=$C_BYELLOW
+                [[ $(echo "${lags:-0} > 120" | bc 2>/dev/null) == "1" ]] && c=$C_BRED
+                printf "  %-20s  %-8s  ${c}%12s${C_RESET}  %14s  %14s\n" \
+                    "$ts" "$role" "${lags:-0}" "$(fmt_bytes "${lagb:-0}")" "$(fmt_bytes "${ret:-0}")"
+            done
+            ;;
+
+        # ────────────────────────────────────────────────────
+        growth)
+            ui_section "테이블 크기 증가  (${period}  — 기간 첫 수집 대비 마지막 수집)"
+            printf "\n"
+            printf "  ${C_BBLUE}%-40s  %12s  %12s  %12s  %8s${C_RESET}\n" \
+                "Table" "시작" "현재" "증가" "증가율"
+            ui_hline '─' "$C_BBLACK"
+            local grows
+            grows=$(_repo_psql "
+WITH s AS (
+  SELECT schemaname||'.'||tablename t, collected_at, total_size_bytes b
+  FROM pgmon.snap_table
+  WHERE db_id=${db_id:-0} AND collected_at >= now() - interval '${interval_str}'
+), f AS (SELECT DISTINCT ON (t) t, b FROM s ORDER BY t, collected_at),
+   l AS (SELECT DISTINCT ON (t) t, b FROM s ORDER BY t, collected_at DESC)
+SELECT f.t, f.b, l.b, l.b - f.b, round((l.b - f.b)*100.0/NULLIF(f.b,0),1)
+FROM f JOIN l USING (t)
+ORDER BY 4 DESC, 3 DESC LIMIT 30")
+            if [[ -z "$grows" ]]; then
+                printf "  ${C_DIM}(데이터 없음 — 설정에서 object 수집 ON 확인, 기본 300초 주기)${C_RESET}\n"
+            else
+                while IFS='|' read -r t b0 b1 d pct; do
+                    local c=$C_WHITE
+                    (( ${d:-0} > 0 )) && c=$C_BYELLOW
+                    printf "  %-40s  %12s  %12s  ${c}%12s  %7s%%${C_RESET}\n" \
+                        "${t:0:40}" "$(fmt_bytes "${b0:-0}")" "$(fmt_bytes "${b1:-0}")" \
+                        "$(fmt_bytes "${d:-0}")" "${pct:-0}"
+                done <<< "$grows"
+            fi
+            ;;
+
+        # ────────────────────────────────────────────────────
         statement)
             ui_section "Statement 트렌드  (${period}  — 평균 실행시간 Top 20)"
             printf "\n"
@@ -384,11 +458,11 @@ LIMIT 40" | while IFS='|' read -r ts warn_c crit_c top_metric; do
 
             # ── 뷰 변경 ───────────────────────────────────────
             v)
-                printf "\n  ${C_BYELLOW}뷰 선택 (summary/cpu/session/lock/vacuum/statement/alert): ${C_RESET}"
+                printf "\n  ${C_BYELLOW}뷰 선택 (summary/cpu/session/lock/vacuum/repl/growth/statement/alert): ${C_RESET}"
                 local new_view
                 read -r new_view
                 case "$new_view" in
-                    summary|cpu|session|lock|vacuum|statement|alert)
+                    summary|cpu|session|lock|vacuum|repl|growth|statement|alert)
                         view="$new_view" ;;
                     *) printf "  ${C_BRED}잘못된 뷰입니다${C_RESET}\n"; sleep 1 ;;
                 esac
@@ -488,6 +562,26 @@ WHERE db_id=${db_id}
 GROUP BY 1, 2
 ORDER BY mean_ms_avg DESC
 LIMIT 100
+) TO STDOUT CSV HEADER"
+            ;;
+        repl)
+            sql="COPY (
+SELECT collected_at, node_role, client_addr, application_name, state, sync_state,
+       replay_lsn, lag_bytes, replay_lag_sec
+FROM pgmon.snap_replication
+WHERE db_id=${db_id}
+  AND collected_at >= now() - interval '${interval}'
+ORDER BY collected_at DESC
+) TO STDOUT CSV HEADER"
+            ;;
+        growth)
+            sql="COPY (
+SELECT collected_at, schemaname, tablename, total_size_bytes,
+       table_size_bytes, index_size_bytes, n_live_tup, n_dead_tup
+FROM pgmon.snap_table
+WHERE db_id=${db_id}
+  AND collected_at >= now() - interval '${interval}'
+ORDER BY schemaname, tablename, collected_at
 ) TO STDOUT CSV HEADER"
             ;;
         alert)

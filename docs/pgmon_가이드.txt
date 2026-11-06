@@ -23,6 +23,7 @@
      5-7. Alert
      5-8. 설정 (Settings)
      5-9. Report
+     5-10. 복제 (Replication)
   6. 키 조작 요약
   7. 파일 구조
   8. 자주 발생하는 문제 (Troubleshooting)
@@ -429,6 +430,15 @@ pg_stat_statements extension이 설치되지 않은 경우 설치 안내 메시�
 [ 조작 키 ]
   s  : 정렬 순환
        mean(평균시간) → total(합계시간) → calls(호출수) → rows → cache → mean
+  d  : 상세보기 — 번호 입력 → 전체 SQL + 통계 (calls / mean / max / rows /
+       cache hit / temp blks / 실행 유저)
+  t  : 튜닝 — 번호 입력 → pg_tune_ai 의 pgtune tune 실행 결과 표시
+       · 파라미터($1, $2 …)가 있으면 실제 값을 넣은 SQL 을 한 줄로 입력
+       · 실행 계정 선택 (모니터링 계정은 업무 테이블 조회 권한이 없을 수 있음)
+       · 기본은 EXPLAIN 만 (쿼리 실행 안 함), y 입력 시 EXPLAIN ANALYZE
+       · 인덱스 후보 검증은 대상 DB 에 hypopg 필요 (없으면 "검증 불가" 표시)
+       · pg_tune_ai 위치: PGTUNE_CMD → PATH 의 pgtune → ../../tools/pg_tune_ai
+       · 로그: pgmon/conf/pgtune_log/
   r  : pg_stat_statements 통계 초기화 (pg_stat_statements_reset())
        확인 프롬프트 후 실행
   q  : 기능 메뉴로
@@ -568,11 +578,13 @@ Alert 발생 현황과 임계값을 관리합니다.
   session    : 세션 수 시간대별 집계
   lock       : Lock 발생 이력
   vacuum     : 테이블별 Dead Ratio 최대값 집계
+  repl       : 복제 지연(초 / bytes) + 슬롯 WAL 적체 시간대별 최대값
+  growth     : 테이블 크기 증가 — 기간 첫 수집 대비 마지막 수집 (Top 30)
   statement  : SQL 평균 실행시간 집계 Top 20
   alert      : Alert 발생 건수 시간대별 집계
 
 [ CSV 내보내기 (x 키) ]
-  현재 보고 있는 뷰를 CSV로 저장합니다.
+  현재 보고 있는 뷰를 CSV로 저장합니다. (summary / cpu 제외)
   저장 위치: pgmon/conf/reports/pgmon_{닉네임}_{뷰}_{기간}_{일시}.csv
 
 [ 조작 키 ]
@@ -581,6 +593,35 @@ Alert 발생 현황과 임계값을 관리합니다.
   x  : CSV 내보내기
   q  : 기능 메뉴로
   ESC: DB 선택 화면으로
+
+
+----------------------------------------------------------------
+5-10. 복제 (Replication)
+----------------------------------------------------------------
+
+기능 메뉴 9번. 대상 DB 를 실시간 조회합니다 (10초 자동 갱신).
+
+[ Primary 인 경우 ]
+  연결된 standby 별: Client / App / State / Sync / Lag(bytes) / Lag(sec) / Replay LSN
+  standby 가 하나도 없으면 경고 표시
+
+[ Standby 인 경우 ]
+  WAL receiver 상태(streaming 여부) / upstream / receive·replay LSN /
+  미적용 WAL 크기 / replay 지연(초) / 마지막 replay 트랜잭션 시각
+
+[ 공통 ]
+  복제 슬롯: active 여부 / WAL 적체량 / wal_status
+    ※ inactive 슬롯은 WAL 을 계속 붙잡아 디스크가 찰 수 있음 (노랑)
+  최근 1시간 지연 추이 (collector 수집분, 5분 단위 최대값)
+
+[ 관련 Alert ]
+  replication_lag_sec     : 기본 WARN 30초 / CRIT 120초
+  repl_slot_retained_mb   : 기본 WARN 1024MB / CRIT 10240MB (메시지에 슬롯명 표시)
+  dead_ratio_pct          : 기본 WARN 20% / CRIT 50% (dead 1,000건 이상 테이블, 메시지에 테이블명)
+
+[ 기존 설치본 ]
+  저장소 DB 에 init.sql 을 한 번 다시 실행해야 수집됩니다 (몇 번 돌려도 안전):
+    psql -U postgres -d postgres -f pgmon/sql/init.sql
 
 
 ================================================================
@@ -601,7 +642,8 @@ Alert 발생 현황과 임계값을 관리합니다.
   p           기간 변경 (Report)
   x           CSV 내보내기 (Report)
   e           항목 수정 (Settings / Alert)
-  t           Collector 토글 (Settings)
+  t           Collector 토글 (Settings) / pg_tune_ai 튜닝 (Statement)
+  d           SQL 상세보기 (Statement)
 
 
 ================================================================

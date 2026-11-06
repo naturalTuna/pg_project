@@ -21,6 +21,7 @@ source "${PGMON_HOME}/lib/object.sh"
 source "${PGMON_HOME}/lib/alert.sh"
 source "${PGMON_HOME}/lib/settings.sh"
 source "${PGMON_HOME}/lib/report.sh"
+source "${PGMON_HOME}/lib/replication.sh"
 
 # ── 전제 조건 확인 ────────────────────────────────────────────
 _check_deps() {
@@ -80,6 +81,7 @@ _feature_menu() {
             "6) Alert        — 활성 Alert 및 임계값 설정"
             "7) 설정         — 수집 주기 / Retention 설정"
             "8) Report       — 기간별 트렌드 리포트"
+            "9) 복제         — Standby 상태 / 지연 / 복제 슬롯"
             "q) 뒤로         — DB 선택 화면으로"
         )
         ui_menu menu_items
@@ -112,6 +114,7 @@ _feature_menu() {
             6) alert_run      "$idx" || ret=$? ;;
             7) settings_run   "$idx" || ret=$? ;;
             8) report_run     "$idx" || ret=$? ;;
+            9) replication_run "$idx" || ret=$? ;;
             q|"__ESC__")
                 return 0
                 ;;

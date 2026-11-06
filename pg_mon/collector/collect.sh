@@ -59,7 +59,7 @@ WHERE db_id=${DB_ID} AND metric_name='${metric}'")
 
 # ── 타임스탬프 추적 ───────────────────────────────────────────
 declare -A LAST_RUN
-for m in dashboard session statement vacuum object lock; do
+for m in dashboard session statement vacuum object lock replication; do
     LAST_RUN[$m]=0
 done
 
@@ -176,7 +176,7 @@ collect_statement() {
     rows=$(_tpsql "
 SELECT
     queryid,
-    usename,
+    r.rolname,
     d.datname,
     calls,
     total_exec_time,
@@ -294,6 +294,130 @@ INSERT INTO pgmon.snap_lock
 VALUES ${vals}"
 }
 
+# ── SQL 문자열 이스케이프 ('' 처리) ──────────────────────────
+_q() { local v="${1//\'/\'\'}"; printf "'%s'" "$v"; }
+# 빈 값이면 NULL, 아니면 숫자 그대로
+_n() { [[ -n "$1" ]] && printf '%s' "$1" || printf 'NULL'; }
+# psql 의 t/f → SQL boolean
+_b() { case "$1" in t|true) printf 'true' ;; f|false) printf 'false' ;; *) printf 'NULL' ;; esac; }
+
+# ── Replication 수집 ─────────────────────────────────────────
+#  primary : pg_stat_replication (standby 별 1행)
+#  standby : pg_stat_wal_receiver + receive/replay 차이 (1행)
+#  공통    : pg_replication_slots (WAL 적체량)
+collect_replication() {
+    local is_rec rows vals=""
+    is_rec=$(_tpsql "SELECT pg_is_in_recovery()")
+    [[ -z "$is_rec" ]] && return
+
+    if [[ "$is_rec" == "f" ]]; then
+        rows=$(_tpsql "
+SELECT coalesce(host(client_addr),'local'), usename, application_name,
+       state, sync_state, sent_lsn, write_lsn, flush_lsn, replay_lsn,
+       round(coalesce(extract(epoch FROM replay_lag),0)::numeric,1),
+       round(extract(epoch FROM write_lag)::numeric,1),
+       round(extract(epoch FROM flush_lag)::numeric,1),
+       coalesce(pg_wal_lsn_diff(pg_current_wal_lsn(), replay_lsn),0)::bigint
+FROM pg_stat_replication")
+        while IFS='|' read -r ca usn app st sst sl wl fl rl rlag wlag flag lagb; do
+            [[ -z "$ca$usn$app" ]] && continue
+            [[ -z "$vals" ]] || vals+=","
+            vals+="(${DB_ID},'primary',$(_q "$ca"),$(_q "$usn"),$(_q "$app"),$(_q "$st"),$(_q "$sst"),
+                    $(_q "$sl"),$(_q "$wl"),$(_q "$fl"),$(_q "$rl"),
+                    $(_n "$rlag")*interval '1 second',$(_n "$wlag")*interval '1 second',
+                    $(_n "$flag")*interval '1 second',$(_n "$lagb"),$(_n "$rlag"))"
+        done <<< "$rows"
+    else
+        rows=$(_tpsql "
+SELECT coalesce((SELECT sender_host FROM pg_stat_wal_receiver),''),
+       coalesce((SELECT status FROM pg_stat_wal_receiver),'disconnected'),
+       pg_last_wal_receive_lsn(), pg_last_wal_replay_lsn(),
+       coalesce(pg_wal_lsn_diff(pg_last_wal_receive_lsn(), pg_last_wal_replay_lsn()),0)::bigint,
+       CASE WHEN pg_last_wal_receive_lsn() = pg_last_wal_replay_lsn() THEN 0
+            ELSE round(coalesce(extract(epoch FROM now() - pg_last_xact_replay_timestamp()),0)::numeric,1)
+       END")
+        local sender status rcv rpl lagb lags
+        IFS='|' read -r sender status rcv rpl lagb lags <<< "$rows"
+        vals="(${DB_ID},'standby',$(_q "$sender"),NULL,NULL,$(_q "$status"),NULL,
+               NULL,NULL,$(_q "$rcv"),$(_q "$rpl"),
+               $(_n "$lags")*interval '1 second',NULL,NULL,$(_n "$lagb"),$(_n "$lags"))"
+    fi
+
+    if [[ -n "$vals" ]]; then
+        _rpsql_exec "
+INSERT INTO pgmon.snap_replication
+    (db_id,node_role,client_addr,usename,application_name,state,sync_state,
+     sent_lsn,write_lsn,flush_lsn,replay_lsn,replay_lag,write_lag,flush_lag,
+     lag_bytes,replay_lag_sec)
+VALUES ${vals}" || log "snap_replication INSERT 실패 (init.sql 재실행 필요할 수 있음)"
+    fi
+
+    # 슬롯 (wal_status 는 PG13+ — to_jsonb 로 버전 무관하게 조회)
+    rows=$(_tpsql "
+SELECT s.slot_name, s.slot_type, s.active,
+       coalesce(pg_wal_lsn_diff(
+           CASE WHEN pg_is_in_recovery() THEN pg_last_wal_replay_lsn()
+                ELSE pg_current_wal_lsn() END, s.restart_lsn),0)::bigint,
+       coalesce(to_jsonb(s)->>'wal_status','')
+FROM pg_replication_slots s")
+    vals=""
+    while IFS='|' read -r sn stp act ret ws; do
+        [[ -z "$sn" ]] && continue
+        [[ -z "$vals" ]] || vals+=","
+        vals+="(${DB_ID},$(_q "$sn"),$(_q "$stp"),$(_b "$act"),$(_n "$ret"),$(_q "$ws"))"
+    done <<< "$rows"
+    [[ -z "$vals" ]] && return
+    _rpsql_exec "
+INSERT INTO pgmon.snap_repl_slot
+    (db_id,slot_name,slot_type,active,retained_bytes,wal_status)
+VALUES ${vals}" || log "snap_repl_slot INSERT 실패 (init.sql 재실행 필요)"
+}
+
+# ── Object 수집 (테이블 / 인덱스 크기 추이용) ────────────────
+collect_object() {
+    local rows vals=""
+    rows=$(_tpsql "
+SELECT schemaname, relname,
+       pg_total_relation_size(relid), pg_relation_size(relid), pg_indexes_size(relid),
+       coalesce(seq_scan,0), coalesce(idx_scan,0), n_live_tup, n_dead_tup,
+       round(n_dead_tup*100.0/NULLIF(n_live_tup+n_dead_tup,0),2)
+FROM pg_stat_user_tables
+ORDER BY pg_total_relation_size(relid) DESC
+LIMIT 100")
+    while IFS='|' read -r sch tbl tot tsz isz seq idx live dead ratio; do
+        [[ -z "$tbl" ]] && continue
+        [[ -z "$vals" ]] || vals+=","
+        vals+="(${DB_ID},$(_q "$sch"),$(_q "$tbl"),$(_n "$tot"),$(_n "$tsz"),$(_n "$isz"),
+                $(_n "$seq"),$(_n "$idx"),$(_n "$live"),$(_n "$dead"),$(_n "$ratio"))"
+    done <<< "$rows"
+    [[ -n "$vals" ]] && { _rpsql_exec "
+INSERT INTO pgmon.snap_table
+    (db_id,schemaname,tablename,total_size_bytes,table_size_bytes,index_size_bytes,
+     seq_scan,idx_scan,n_live_tup,n_dead_tup,bloat_ratio_pct)
+VALUES ${vals}" || log "snap_table INSERT 실패"; }
+
+    rows=$(_tpsql "
+SELECT s.schemaname, s.relname, s.indexrelname, pg_relation_size(s.indexrelid),
+       s.idx_scan, s.idx_tup_read, s.idx_tup_fetch, i.indisunique, i.indisprimary
+FROM pg_stat_user_indexes s
+JOIN pg_index i ON i.indexrelid = s.indexrelid
+ORDER BY pg_relation_size(s.indexrelid) DESC
+LIMIT 200")
+    vals=""
+    while IFS='|' read -r sch tbl ix sz scan trd tft uq pk; do
+        [[ -z "$ix" ]] && continue
+        [[ -z "$vals" ]] || vals+=","
+        vals+="(${DB_ID},$(_q "$sch"),$(_q "$tbl"),$(_q "$ix"),$(_n "$sz"),
+                $(_n "$scan"),$(_n "$trd"),$(_n "$tft"),$(_b "$uq"),$(_b "$pk"))"
+    done <<< "$rows"
+    [[ -n "$vals" ]] && { _rpsql_exec "
+INSERT INTO pgmon.snap_index
+    (db_id,schemaname,tablename,indexname,index_size_bytes,
+     idx_scan,idx_tup_read,idx_tup_fetch,is_unique,is_primary)
+VALUES ${vals}" || log "snap_index INSERT 실패"; }
+    return 0
+}
+
 # ── 데이터 정리 (retention) ──────────────────────────────────
 purge_old_data() {
     local retention
@@ -302,7 +426,8 @@ SELECT retention_days FROM pgmon.registered_db WHERE db_id=${DB_ID}")
     retention="${retention:-15}"
 
     for tbl in snap_server_info snap_session snap_statement \
-               snap_vacuum snap_lock snap_table snap_index snap_replication; do
+               snap_vacuum snap_lock snap_table snap_index snap_replication \
+               snap_repl_slot; do
         _rpsql_exec "
 DELETE FROM pgmon.${tbl}
 WHERE db_id=${DB_ID}
@@ -338,11 +463,54 @@ ORDER BY collected_at DESC LIMIT 1")
     _check_metric "lock_count"           "${lck:-0}"
     _check_metric "idle_in_tx_sessions"  "${itx:-0}"
     _check_metric "long_sessions"        "${lng:-0}"
+
+    # ── 복제 지연 (최근 수집 배치 기준 최대값) ──
+    local rl
+    rl=$(_rpsql "
+SELECT coalesce(max(replay_lag_sec),0) FROM pgmon.snap_replication
+WHERE db_id=${DB_ID}
+  AND collected_at = (SELECT max(collected_at) FROM pgmon.snap_replication WHERE db_id=${DB_ID})
+  AND collected_at > now() - interval '10 minutes'")
+    [[ -n "$rl" ]] && _check_metric "replication_lag_sec" "$rl"
+
+    # ── 슬롯 WAL 적체 (MB) ──
+    local slot
+    slot=$(_rpsql "
+SELECT round(retained_bytes/1048576.0,1), slot_name, active FROM pgmon.snap_repl_slot
+WHERE db_id=${DB_ID}
+  AND collected_at = (SELECT max(collected_at) FROM pgmon.snap_repl_slot WHERE db_id=${DB_ID})
+  AND collected_at > now() - interval '10 minutes'
+ORDER BY retained_bytes DESC NULLS LAST LIMIT 1")
+    if [[ -n "$slot" ]]; then
+        local smb sname sact
+        IFS='|' read -r smb sname sact <<< "$slot"
+        _check_metric "repl_slot_retained_mb" "${smb:-0}" "slot=${sname} active=${sact}"
+    else
+        _check_metric "repl_slot_retained_mb" 0
+    fi
+
+    # ── 테이블 dead ratio (dead 1000건 이상 테이블만, 최근 vacuum 수집 기준) ──
+    local dr
+    dr=$(_rpsql "
+SELECT dead_ratio_pct, schemaname||'.'||tablename FROM pgmon.snap_vacuum
+WHERE db_id=${DB_ID}
+  AND collected_at = (SELECT max(collected_at) FROM pgmon.snap_vacuum WHERE db_id=${DB_ID})
+  AND n_dead_tup >= 1000
+ORDER BY dead_ratio_pct DESC NULLS LAST LIMIT 1")
+    if [[ -n "$dr" ]]; then
+        local drv drt
+        IFS='|' read -r drv drt <<< "$dr"
+        _check_metric "dead_ratio_pct" "${drv:-0}" "table=${drt}"
+    else
+        _check_metric "dead_ratio_pct" 0
+    fi
 }
 
 _check_metric() {
     local metric=$1
     local val=$2
+    local detail="${3:-}"     # 메시지에 덧붙일 상세 (테이블명, 슬롯명 등)
+    detail="${detail//\'/\'\'}"
 
     local thresholds
     thresholds=$(_rpsql "
@@ -387,7 +555,7 @@ INSERT INTO pgmon.alert_history
     (db_id, metric_name, severity, current_value, threshold, message)
 VALUES
     (${DB_ID}, '${metric}', '${severity}', ${val}, ${threshold},
-     '${metric} = ${val} (임계값: ${threshold})')" 2>/dev/null || true
+     '${metric} = ${val} (임계값: ${threshold})${detail:+ — ${detail}}')" 2>/dev/null || true
 }
 
 # ── 메인 루프 ─────────────────────────────────────────────────
@@ -401,7 +569,7 @@ while true; do
     NOW=$(date +%s)
 
     # 각 메트릭별 수집 주기 체크
-    for metric in dashboard session statement vacuum lock; do
+    for metric in dashboard session statement vacuum object lock replication; do
         local_interval=$(get_interval "$metric")
         [[ "${local_interval}" -le 0 ]] && continue
         elapsed=$(( NOW - ${LAST_RUN[$metric]:-0} ))
@@ -412,6 +580,8 @@ while true; do
                 statement) collect_statement ;;
                 vacuum)    collect_vacuum ;;
                 lock)      collect_lock ;;
+                object)    collect_object ;;
+                replication) collect_replication ;;
             esac
             LAST_RUN[$metric]=$NOW
         fi

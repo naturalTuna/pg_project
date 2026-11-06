@@ -129,6 +129,18 @@
     2379 - 클라이언트 포트 (Patroni → etcd 통신)
     2380 - 피어 포트      (etcd 노드 간 통신)
 
+  노드 구성 (postgresql_install.sh 입력 단계에서 선택):
+    1) 단일 노드 : etcd 서버 1대
+                   → etcd 서버 장애 시 Patroni 가 Leader Lock 을 갱신 못 해
+                     Primary 가 강등되고 failover 도 불가 (SPOF)
+    2) 3노드     : etcd 서버 + Primary + Standby 에 etcd 설치 (권장)
+                   → 1대 장애에도 quorum(2/3) 유지
+                   → patroni.yml etcd3.hosts 에 세 노드 모두 등록
+                   → 세 서버 간 2379 / 2380 포트 허용 필요
+    상태 확인:
+      etcdctl --endpoints=http://<IP1>:2379,http://<IP2>:2379,http://<IP3>:2379 endpoint health
+      etcdctl --endpoints=http://<IP1>:2379 member list
+
   주요 기능:
   - Patroni Leader Lock 보관
     (누가 현재 Primary 인지 저장)

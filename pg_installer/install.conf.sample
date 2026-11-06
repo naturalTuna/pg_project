@@ -1,0 +1,56 @@
+# ============================================================
+#  postgresql_install.sh 응답 파일 샘플
+#
+#  사용법
+#    cp install.conf.sample install.conf && chmod 600 install.conf
+#    vi install.conf
+#    bash postgresql_install.sh -c install.conf        # 비어있는 항목은 질문
+#    bash postgresql_install.sh -c install.conf -y     # 완전 무인 (비어있는 항목은 기본값)
+#
+#  - 형식: 변수명=값   (값에 # 이나 공백이 있으면 "..." 로 감싸기)
+#  - 줄을 지우거나 # 으로 주석 처리하면 해당 질문은 대화형으로 묻는다 (-y 면 기본값)
+#  - 값을 비워두면(KEY=) 기본값 사용
+# ============================================================
+
+# ── 공통 ─────────────────────────────────────────────────────
+DO_INSTALL=y
+PROC_CONTINUE=n            # PostgreSQL 프로세스가 이미 떠 있으면 중단(n) / 계속(y)
+MODE_SEL=1                 # 1=single  2=ha
+
+# ── single 모드 ──────────────────────────────────────────────
+CPU_CORES=                 # 비우면 서버 코어 수
+MEM_GB=                    # 비우면 서버 메모리(GB)
+PG_PORT=5432
+
+# ── ha 모드 (MODE_SEL=2 일 때만 사용) ────────────────────────
+#CLUSTER_NAME=pg-cluster
+#HA_ETCD_HOST=pg-etcd
+#HA_PRIMARY_HOST=pg-pri
+#HA_STANDBY_HOST=pg-sby
+#HA_SSH_PORT=22
+#ETCD_MODE_SEL=2           # 1=etcd 단일 노드  2=3노드(권장)
+#REPL_USER_HA=replicator
+#REPL_PASS_HA="change_me"
+#PRI_CPU=
+#PRI_MEM_GB=
+#SBY_CPU=
+#SBY_MEM_GB=
+
+# ── 경로 ─────────────────────────────────────────────────────
+ENGINE_BASE=/postgres      # → /postgres/app
+DATA_BASE=/pgdata          # → /pgdata/data, /pgdata/log
+PG_LOCALE=ko_KR.utf8
+
+USE_ARCHIVE=y
+ARC_BASE=/pgbackup         # → /pgbackup/arc
+
+USE_BACKUP=y
+BACK_BASE=/pgbackup        # → /pgbackup/back, /pgbackup/dump
+BACKUP_HOST_SEL=2          # (ha) 1=primary 2=standby 3=etcd
+BACKUP_CRON_SEL=1          # 1=매일 02시  2=매주 일요일 02시  3=직접 입력
+#BACKUP_CRON="30 1 * * *"  # BACKUP_CRON_SEL=3 일 때
+BACKUP_KEEP=7
+REPL_USER=replicator       # (single) 백업용 복제 유저
+
+# ── 최종 확인 ────────────────────────────────────────────────
+CONFIRM=y
