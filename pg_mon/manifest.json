@@ -5,9 +5,7 @@
   "entry": "pgmon.sh",
   "requires": {
     "rpm": [
-      "bc",
-      "sysstat"
+      "bc"
     ]
   }
 }
-

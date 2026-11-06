@@ -31,7 +31,7 @@ conf_save() {
         local i key var
         for i in $(seq 1 "${TARGET_COUNT:-0}"); do
             printf '\n# ── 대상 DB #%s ──────────────────────────────────────────\n' "$i"
-            for key in NICKNAME HOST PORT DBNAME USER PASS RETENTION; do
+            for key in NICKNAME HOST PORT DBNAME USER PASS RETENTION SSH_USER SSH_PORT; do
                 var="TARGET_${i}_${key}"
                 printf '%s=%q\n' "$var" "${!var:-}"
             done
@@ -208,6 +208,17 @@ BEGIN
   END IF;
 END\$\$;
 
+-- pg_read_server_files 부여 (DB 서버 OS 지표: /proc 읽기용, PG11+)
+--  ※ 서버 파일 읽기 권한이므로 필요 없으면 REVOKE 하고 SSH 방식 사용
+DO \$\$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'pg_read_server_files') THEN
+    EXECUTE 'GRANT pg_read_server_files TO ${mon_user}';
+  END IF;
+  -- pg_read_file 은 기본적으로 PUBLIC 실행 권한이 회수돼 있어 별도 GRANT 필요
+  EXECUTE 'GRANT EXECUTE ON FUNCTION pg_catalog.pg_read_file(text) TO ${mon_user}';
+END\$\$;
+
 -- pg_ls_waldir 실행 권한 (WAL 사이즈 조회용, PG10+ 필요)
 DO \$\$
 BEGIN
@@ -288,6 +299,15 @@ SQL
                 printf "    아래 명령을 superuser로 실행하세요:\n"
                 printf "    ${C_DIM}GRANT pg_monitor TO ${mon_user};${C_RESET}\n"
             fi
+            # DB 서버 OS 지표(/proc) 읽기 권한 확인 — 없으면 SSH fallback 사용
+            local has_rsf
+            has_rsf=$(PGPASSWORD="$mon_pass" psql \
+                -h "$host" -p "$port" -U "$mon_user" -d "$dbname" \
+                -Atc "SELECT length(pg_read_file('/proc/loadavg')) > 0" 2>/dev/null || echo "f")
+            if [[ "$has_rsf" != "t" ]]; then
+                printf "  ${C_BYELLOW}⚠ /proc 읽기 권한 없음 — OS 지표는 SSH 로 수집합니다.${C_RESET}\n"
+                printf "    DB 접속으로 받으려면 superuser로: ${C_DIM}GRANT pg_read_server_files TO ${mon_user}; GRANT EXECUTE ON FUNCTION pg_read_file(text) TO ${mon_user};${C_RESET}\n"
+            fi
         else
             printf "\r  ${C_BRED}✘ 연결 실패${C_RESET}\n"
         fi
@@ -331,6 +351,17 @@ input_target_db() {
     ui_prompt "데이터 보관 주기 (일)" retention "15"
     [[ "$retention" == "__ESC__" ]] && return 1
     printf -v "${prefix}_RETENTION" '%s' "${retention}"
+
+    # OS 지표 SSH fallback 용 (DB 의 pg_read_file 이 안 될 때만 사용)
+    local ssh_user ssh_port _k
+    _k="${prefix}_SSH_USER"
+    ui_prompt "OS 지표용 SSH 유저 (pg_read_file 불가 시 사용)" ssh_user "${!_k:-$(whoami)}"
+    [[ "$ssh_user" == "__ESC__" ]] && return 1
+    printf -v "${prefix}_SSH_USER" '%s' "${ssh_user}"
+    _k="${prefix}_SSH_PORT"
+    ui_prompt "OS 지표용 SSH 포트" ssh_port "${!_k:-22}"
+    [[ "$ssh_port" == "__ESC__" ]] && return 1
+    printf -v "${prefix}_SSH_PORT" '%s' "${ssh_port}"
 
     # 연결 테스트
     printf "\n  ${C_DIM}연결 테스트 중...${C_RESET}"
@@ -518,7 +549,7 @@ _remove_target_from_conf() {
     local j=1
     for i in $(seq 1 "$TARGET_COUNT"); do
         [[ $i -eq $rm_idx ]] && continue
-        for key in NICKNAME HOST PORT DBNAME USER PASS RETENTION; do
+        for key in NICKNAME HOST PORT DBNAME USER PASS RETENTION SSH_USER SSH_PORT; do
             local src="TARGET_${i}_${key}"
             local dst="TARGET_${j}_${key}"
             printf -v "$dst" '%s' "${!src}"

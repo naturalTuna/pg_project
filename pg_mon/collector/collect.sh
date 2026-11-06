@@ -41,6 +41,8 @@ NICK="$(_pgmon_k1="TARGET_${TARGET_IDX}_NICKNAME"; echo "${!_pgmon_k1}")"
 DB_ID=$(_rpsql "SELECT db_id FROM pgmon.registered_db WHERE nickname='${NICK}'")
 : "${DB_ID:?DB_ID 조회 실패 — nickname=${NICK}}"
 
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [collector:${NICK}] $*"; }
+
 # ── 수집 주기 조회 ────────────────────────────────────────────
 get_interval() {
     local metric=$1
@@ -61,42 +63,18 @@ for m in dashboard session statement vacuum object lock; do
     LAST_RUN[$m]=0
 done
 
-# ── OS 메트릭 (로컬 서버 기준) ───────────────────────────────
-collect_os() {
-    CPU_USAGE=$(top -bn1 2>/dev/null | grep "Cpu(s)" \
-        | awk '{print 100 - $8}' | cut -d. -f1 || echo "0")
-    local mem_info
-    mem_info=$(free -m 2>/dev/null)
-    MEM_TOTAL=$(echo "$mem_info" | awk '/^Mem:/{print $2}')
-    MEM_USED=$( echo "$mem_info" | awk '/^Mem:/{print $3}')
-    [[ -z "$MEM_TOTAL" || "$MEM_TOTAL" == "0" ]] && MEM_TOTAL=1
-    MEM_PCT=$(( MEM_USED * 100 / MEM_TOTAL ))
-
-    SWAP_TOTAL=$(echo "$mem_info" | awk '/^Swap:/{print $2}')
-    SWAP_USED=$( echo "$mem_info" | awk '/^Swap:/{print $3}')
-    [[ -z "$SWAP_TOTAL" || "$SWAP_TOTAL" == "0" ]] && SWAP_TOTAL=1
-    SWAP_PCT=$(( SWAP_USED * 100 / SWAP_TOTAL ))
-
-    if command -v iostat &>/dev/null; then
-        local io
-        io=$(iostat -d -k 1 2 2>/dev/null | tail -n +4 | \
-             awk 'NF>3{r+=$3; w+=$4} END{printf "%.1f %.1f", r, w}')
-        DISK_READ_KB=$(echo "$io" | awk '{print $1}')
-        DISK_WRITE_KB=$(echo "$io" | awk '{print $2}')
-    else
-        DISK_READ_KB=0; DISK_WRITE_KB=0
-    fi
-}
+# ── OS 메트릭 (대상 DB 서버 기준: DB의 /proc 읽기 → 실패 시 SSH) ──
+source "${PGMON_HOME}/lib/osmetrics.sh"
 
 # ── Dashboard / Server Info 수집 ─────────────────────────────
 collect_dashboard() {
-    collect_os
+    os_collect "${TARGET_IDX}" || log "OS 지표 수집 실패 (pg_read_server_files 권한 / SSH 키 확인)"
 
     local pg_version hostname db_status ha_role is_recovery
     local wal_bytes tot_sess act idle itx long_s long_sql lck vac dead
 
     pg_version=$(_tpsql "SELECT version()" | awk '{print $1,$2}')
-    hostname=$(hostname)
+    hostname="${OS_HOSTNAME:-}"
     is_recovery=$(_tpsql "SELECT pg_is_in_recovery()")
 
     [[ "$is_recovery" == "t" ]] && ha_role="standby" || ha_role="primary"
@@ -413,7 +391,6 @@ VALUES
 }
 
 # ── 메인 루프 ─────────────────────────────────────────────────
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [collector:${NICK}] $*"; }
 
 log "수집 데몬 시작 (DB_ID=${DB_ID})"
 trap 'log "수집 데몬 종료"; exit 0' SIGTERM SIGINT

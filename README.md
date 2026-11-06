@@ -153,7 +153,7 @@ ha 모드에서는 스크립트를 양쪽 노드에 모두 깔고, 크론은 선
 
 psql + bash만으로 동작하는 터미널 모니터링 툴입니다. 수집 데이터는 별도 저장소 DB(`pgmon`)에 쌓습니다.
 
-필요: `psql`, `bc` (선택: `sysstat`의 `iostat` — 없으면 Disk I/O 미수집)
+필요: `psql`, `bc`
 
 ```bash
 bash monitoring/pgmon/pgmon.sh
@@ -165,7 +165,8 @@ bash monitoring/pgmon/pgmon.sh
 2. superuser로 `sql/init.sql` 실행 → `pgmon_owner` / `pgmon_writer` / `pgmon_reader` role, `pgmon` DB / 스키마 / 테이블 생성
    - 기본 role 패스워드는 role 이름과 같습니다. **운영 환경에서는 바로 변경하세요.**
    - `init.sql`이 DB 이름을 `pgmon`으로 고정해서 만들기 때문에 저장소 DB명은 `pgmon` 그대로 두세요.
-3. 모니터링 대상 DB 등록 → 선택 시 대상 DB에 `pgmon_monitor` role 생성 (`pg_monitor`, `pg_read_all_stats` 등 부여)
+3. 모니터링 대상 DB 등록 → 선택 시 대상 DB에 `pgmon_monitor` role 생성 (`pg_monitor`, `pg_read_all_stats`, `pg_read_server_files` 등 부여)
+   - 등록 시 OS 지표 SSH fallback용 SSH 유저 / 포트도 입력 (기본: 현재 유저 / 22)
 4. 대상 DB에 `pg_stat_statements`, `pg_buffercache`, `pgstattuple` extension 설치 시도
    - `pg_stat_statements`는 `shared_preload_libraries` 등록 + 재시작이 필요합니다.
 
@@ -193,9 +194,23 @@ DB를 고르면 해당 DB의 수집 데몬(`collector/collect.sh`)이 백그라�
 - 30초마다 Alert 임계값 체크, 1시간마다 보관 기간(기본 15일) 지난 데이터 삭제
 - 로그: `pgmon/conf/collector_<닉네임>.log`
 
+### DB 서버 OS 지표 (CPU / MEM / SWAP / Disk I/O / 호스트명)
+
+pgmon 서버가 아니라 **대상 DB 서버** 기준으로 수집합니다. 대상 서버의 `/proc`을 1초 간격으로 두 번 읽어 계산하며, 아래 순서로 시도합니다.
+
+1. **DB 접속** — `pg_read_file('/proc/...')`. 모니터링 role에 아래 권한이 필요합니다 (자동생성 모드는 자동 부여).
+   ```sql
+   GRANT pg_read_server_files TO pgmon_monitor;
+   GRANT EXECUTE ON FUNCTION pg_read_file(text) TO pgmon_monitor;
+   ```
+   `pg_read_server_files`는 DB 서버의 파일을 읽을 수 있는 권한입니다. 부담되면 REVOKE 하고 SSH 방식을 쓰세요.
+2. **SSH** — 1번이 안 되면 `ssh <SSH유저>@<대상호스트> cat /proc/...`. pgmon 서버 → DB 서버 키 교환이 필요합니다 (패스워드 입력 안 함).
+3. 둘 다 실패하면 대시보드에 "수집 불가"로 표시되고 collector 로그에 남습니다.
+
+대시보드 `Host Resources` 제목 옆에 어떤 방식으로 가져왔는지 표시됩니다.
+
 ### 알아둘 점
 
-- CPU / 메모리 / 디스크 같은 **OS 지표는 pgmon이 실행되는 서버 기준**입니다 (원격 대상 DB 서버의 OS 지표가 아님).
 - `object` 메트릭은 수집 설정에 있지만 데몬이 수집하지 않습니다. Object 화면은 대상 DB를 실시간으로 조회합니다.
 
 ---
