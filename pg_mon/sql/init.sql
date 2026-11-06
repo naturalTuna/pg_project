@@ -266,6 +266,31 @@ CREATE TABLE IF NOT EXISTS snap_replication (
 CREATE INDEX IF NOT EXISTS idx_snap_repl_db_time
     ON snap_replication(db_id, collected_at DESC);
 
+-- 복제 모니터링 확장 (기존 설치본은 init.sql 재실행으로 반영 — 멱등)
+--   node_role      : primary(walsender 기준 행) / standby(wal receiver 기준 행)
+--   lag_bytes      : primary=현재 WAL - replay_lsn, standby=receive - replay
+--   replay_lag_sec : 초 단위 replay 지연
+ALTER TABLE snap_replication ADD COLUMN IF NOT EXISTS node_role      VARCHAR(16);
+ALTER TABLE snap_replication ADD COLUMN IF NOT EXISTS lag_bytes      BIGINT;
+ALTER TABLE snap_replication ADD COLUMN IF NOT EXISTS replay_lag_sec NUMERIC(12,1);
+
+-- -------------------------------------------------------
+-- 복제 슬롯 스냅샷 (inactive 슬롯의 WAL 적체 감시)
+-- -------------------------------------------------------
+CREATE TABLE IF NOT EXISTS snap_repl_slot (
+    snap_id          BIGSERIAL PRIMARY KEY,
+    db_id            INTEGER NOT NULL REFERENCES registered_db(db_id) ON DELETE CASCADE,
+    collected_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    slot_name        VARCHAR(128),
+    slot_type        VARCHAR(16),
+    active           BOOLEAN,
+    retained_bytes   BIGINT,
+    wal_status       VARCHAR(16)
+);
+
+CREATE INDEX IF NOT EXISTS idx_snap_repl_slot_db_time
+    ON snap_repl_slot(db_id, collected_at DESC);
+
 -- -------------------------------------------------------
 -- Alert 설정
 -- -------------------------------------------------------
@@ -292,7 +317,8 @@ FROM (VALUES
   ('idle_in_tx_sessions',   5, 15),
   ('long_sessions',         3, 10),
   ('dead_ratio_pct',       20, 50),
-  ('replication_lag_sec',  30, 120)
+  ('replication_lag_sec',  30, 120),
+  ('repl_slot_retained_mb', 1024, 10240)
 ) AS v(metric, warn, crit)
 WHERE NOT EXISTS (
   SELECT 1 FROM alert_config a

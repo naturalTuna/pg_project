@@ -10,25 +10,35 @@
     "pg_stat_statements": {
       "description": "쿼리 실행 통계 수집",
       "source": "contrib",
-      "used_by": ["pgmon", "pg_tune_ai"],
+      "used_by": [
+        "pgmon",
+        "pg_tune_ai"
+      ],
       "note": "PG contrib 내장"
     },
     "auto_explain": {
       "description": "느린 쿼리 실행계획 자동 로깅",
       "source": "contrib",
-      "used_by": ["pgmon", "pg_tune_ai"],
+      "used_by": [
+        "pgmon",
+        "pg_tune_ai"
+      ],
       "note": "PG contrib 내장"
     },
     "pg_buffercache": {
       "description": "shared_buffers 점유 현황 조회",
       "source": "contrib",
-      "used_by": ["pgmon"],
+      "used_by": [
+        "pgmon"
+      ],
       "note": "PG contrib 내장"
     },
     "pgstattuple": {
       "description": "테이블/인덱스 블록 단위 dead tuple, bloat 통계",
       "source": "contrib",
-      "used_by": ["pgmon"],
+      "used_by": [
+        "pgmon"
+      ],
       "note": "PG contrib 내장"
     },
     "pg_wait_sampling": {
@@ -37,7 +47,9 @@
       "repo": "postgrespro/pg_wait_sampling",
       "git_ref": "",
       "build": "pgxs",
-      "used_by": ["pgmon"],
+      "used_by": [
+        "pgmon"
+      ],
       "note": "받으려면 git_ref 에 릴리스 태그 채우고 source 를 git 으로. shared_preload_libraries 등록 필요."
     },
     "pg_stat_kcache": {
@@ -46,17 +58,21 @@
       "repo": "powa-team/pg_stat_kcache",
       "git_ref": "",
       "build": "pgxs",
-      "used_by": ["pgmon"],
+      "used_by": [
+        "pgmon"
+      ],
       "note": "pg_stat_statements 의존. shared_preload_libraries 등록 필요."
     },
     "hypopg": {
       "description": "가상(hypothetical) 인덱스 — pg_tune_ai verifier 가상 인덱스 검증",
-      "source": "disabled",
+      "source": "git",
       "repo": "HypoPG/hypopg",
-      "git_ref": "",
+      "git_ref": "1.4.1",
       "build": "pgxs",
-      "used_by": ["pg_tune_ai"],
-      "note": "받으려면 git_ref(예: 1.4.1, v 접두사 없음) 채우고 source 를 git 으로."
+      "used_by": [
+        "pg_tune_ai"
+      ],
+      "note": "pg_tune_ai verify/tune 필수. 1.4.1 = PG 16 빌드 확인. PG18 은 상위 릴리스 태그로 교체 필요할 수 있음."
     },
     "pg_qualstats": {
       "description": "WHERE 절 술어(predicate) 선택도 통계 — pg_tune_ai 인덱스 후보 도출",
@@ -64,7 +80,9 @@
       "repo": "powa-team/pg_qualstats",
       "git_ref": "",
       "build": "pgxs",
-      "used_by": ["pg_tune_ai"],
+      "used_by": [
+        "pg_tune_ai"
+      ],
       "note": "shared_preload_libraries 등록 필요."
     },
     "pgaudit": {

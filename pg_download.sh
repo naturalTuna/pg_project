@@ -176,6 +176,17 @@ else
     DOWNLOAD_MON="n"
 fi
 
+# ── pg_tune_ai 포함 여부 ────────────────────────────────────
+#   PG_TUNE_AI_DIR 환경변수 또는 이 레포 옆(../pg_tune_ai)에 있으면 함께 패키징
+PG_TUNE_AI_SRC="${PG_TUNE_AI_DIR:-${SCRIPT_DIR}/../pg_tune_ai}"
+DOWNLOAD_TUNE="n"
+if [[ -f "${PG_TUNE_AI_SRC}/pgtune.py" ]]; then
+    PG_TUNE_AI_SRC="$(cd "${PG_TUNE_AI_SRC}" && pwd)"
+    echo ""
+    read -rp "  pg_tune_ai 튜닝 도구도 함께 패키징 하시겠습니까? [Y/n]: " DOWNLOAD_TUNE
+    DOWNLOAD_TUNE="${DOWNLOAD_TUNE:-y}"
+fi
+
 echo ""
 echo -e "${BOLD}╔══════════════════════════════════════════════╗${NC}"
 echo -e "${BOLD}║              패키징 구성 확인                ║${NC}"
@@ -186,6 +197,9 @@ if [[ "${DOWNLOAD_MON,,}" =~ ^(y|yes)$ ]]; then
 echo -e "${BOLD}║${NC}  pgmon      : Y  (scripts 포함)"
 else
 echo -e "${BOLD}║${NC}  pgmon      : N"
+fi
+if [[ "${DOWNLOAD_TUNE,,}" =~ ^(y|yes)$ ]]; then
+echo -e "${BOLD}║${NC}  pg_tune_ai : Y  (${PG_TUNE_AI_SRC})"
 fi
 echo -e "${BOLD}╚══════════════════════════════════════════════╝${NC}"
 echo ""
@@ -485,6 +499,24 @@ info "postgresql_install.sh 복사 중 → ${INSTALL_DEST}"
 cp "${MODULE_INSTALLER}/postgresql_install.sh" "${INSTALL_DEST}"
 chmod +x "${INSTALL_DEST}"
 info "postgresql_install.sh 복사 완료 → ${INSTALL_DEST}"
+if [[ -f "${MODULE_INSTALLER}/install.conf.sample" ]]; then
+    cp "${MODULE_INSTALLER}/install.conf.sample" "${WORK_DIR}/install.conf.sample"
+    info "무인 설치 응답 파일 샘플 → ${WORK_DIR}/install.conf.sample"
+fi
+
+# ============================================================
+#  6. pg_tune_ai 복사 (선택)
+# ============================================================
+if [[ "${DOWNLOAD_TUNE,,}" =~ ^(y|yes)$ ]]; then
+    step "6. pg_tune_ai 패키징"
+    div
+    TUNE_DEST="${WORK_DIR}/tools/pg_tune_ai"
+    mkdir -p "${TUNE_DEST}"
+    ( cd "${PG_TUNE_AI_SRC}" && tar --exclude=.git --exclude=__pycache__ \
+          --exclude=pgtune_log -cf - . ) | tar -xf - -C "${TUNE_DEST}"
+    info "pg_tune_ai 복사 완료 → ${TUNE_DEST}/"
+    info "  pgmon Statement 화면 [t] 튜닝에서 자동으로 찾아 사용합니다."
+fi
 
 # ============================================================
 #  최종 디렉토리 구조 출력
@@ -533,6 +565,10 @@ if [[ "${_has_mon}" == true ]]; then
     echo -e "${BOLD}║${NC}  │   └── MONITORING_README.txt"
 fi
 
+if [[ -d "${WORK_DIR}/tools/pg_tune_ai" ]]; then
+    echo -e "${BOLD}║${NC}  ├── tools/"
+    echo -e "${BOLD}║${NC}  │   └── pg_tune_ai/"
+fi
 for _i in "${!_root_files[@]}"; do
     if (( _i == _has_root - 1 )); then
         echo -e "${BOLD}║${NC}  └── ${_root_files[${_i}]}"

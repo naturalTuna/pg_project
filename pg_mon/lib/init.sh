@@ -469,7 +469,8 @@ FROM pgmon.registered_db,
         ('statement', 60),
         ('vacuum',    120),
         ('object',    300),
-        ('lock',      15)
+        ('lock',      15),
+        ('replication', 15)
      ) AS m(metric, secs)
 WHERE nickname = '${nick}'
 ON CONFLICT (db_id, metric_name) DO NOTHING;
