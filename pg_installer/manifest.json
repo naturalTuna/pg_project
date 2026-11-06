@@ -13,7 +13,6 @@
       "zlib-devel",
       "openssl-devel",
       "libicu-devel",
-      "systemd-devel",
       "python3-devel",
       "tcl-devel",
       "perl-devel",
@@ -23,9 +22,6 @@
       "libxslt-devel",
       "pkgconf-pkg-config",
       "ncurses-devel",
-      "lz4-devel",
-      "libzstd-devel",
-      "libuuid-devel",
       "wget",
       "tar",
       "gzip",
@@ -36,10 +32,64 @@
       "glibc-langpack-en"
     ],
     "rpm_by_major": {
-      "_comment": "PG 메이저 버전 이상일 때 추가로 받는 rpm (키 = 최소 메이저). 저장소에 없으면 건너뜀",
-      "18": [
-        "liburing-devel"
-      ]
+      "_comment": "PG 메이저 이상일 때 추가로 받는 rpm (키 = 최소 메이저). 기능(features)으로 표현하기 어려운 것만 사용"
     }
-  }
+  },
+  "configure_base": [
+    "--with-openssl",
+    "--with-libxml",
+    "--with-libxslt",
+    "--enable-nls",
+    "--with-python",
+    "--with-tcl",
+    "--with-perl"
+  ],
+  "features": [
+    {
+      "name": "lz4",
+      "configure": "--with-lz4",
+      "pkgconfig": "liblz4",
+      "rpm": [
+        "lz4-devel"
+      ],
+      "desc": "wal_compression=lz4, TOAST lz4 압축"
+    },
+    {
+      "name": "zstd",
+      "configure": "--with-zstd",
+      "pkgconfig": "libzstd",
+      "rpm": [
+        "libzstd-devel"
+      ],
+      "desc": "wal_compression=zstd, pg_basebackup 압축"
+    },
+    {
+      "name": "systemd",
+      "configure": "--with-systemd",
+      "pkgconfig": "libsystemd",
+      "rpm": [
+        "systemd-devel"
+      ],
+      "desc": "systemd notify 지원"
+    },
+    {
+      "name": "uuid",
+      "configure": "--with-uuid=e2fs",
+      "pkgconfig": "uuid",
+      "rpm": [
+        "libuuid-devel"
+      ],
+      "desc": "contrib uuid-ossp"
+    },
+    {
+      "name": "io_uring",
+      "configure": "--with-liburing",
+      "pkgconfig": "liburing",
+      "rpm": [
+        "liburing-devel"
+      ],
+      "desc": "PG18+ io_method=io_uring (커널 5.1+)"
+    }
+  ],
+  "_features_comment": "configure 선택 기능. pg_download.sh 가 받은 PG 소스의 configure --help 로 지원 여부를 자동 판단해서, 지원하는 기능의 rpm 만 받고 installer/build_features.txt 를 만든다. 새 기능은 여기에 한 줄 추가하면 된다 (PG 버전 표기 불필요)."
 }

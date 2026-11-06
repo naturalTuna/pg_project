@@ -418,6 +418,7 @@ cat > "${LOG_INSTALL}" <<EOF
   PostgreSQL Install Log
   Started : $(date '+%Y-%m-%d %H:%M:%S')
   Mode    : ${INSTALL_MODE}
+  Lock    : $(grep -E '^(PG_VERSION|FEATURES|EXT_|VERIFY)' "${SCRIPT_DIR}/BUILD_LOCK.txt" 2>/dev/null | tr '\n' ' ')
   Config  : ${INSTALL_CFG:-대화형}$([[ ${UNATTENDED} == true ]] && echo ' (무인)')
   Version : ${PG_VERSION}
 ============================================================
@@ -560,22 +561,35 @@ fn_build_pg_local() {
     local BUILD_CPU="${1:-${CPU_CORES}}"
 
     # ── configure 옵션 ──────────────────────────────────────
-    #  기본 옵션 + 라이브러리(-devel)가 실제로 설치돼 있는 것만 켠다.
+    #  installer/build_features.txt (pg_download.sh 생성) 의 BASE 는 항상,
+    #  FEATURE 는 라이브러리(-devel)가 실제로 설치돼 있는 것만 켠다.
     #  (PKG 에 -devel 이 빠졌을 때 configure 자체가 실패하지 않도록)
     #  ※ 마이너 업그레이드 시 같은 옵션으로 다시 빌드해야 하므로
     #    ${ENGINE_PATH}/etc/configure_options.txt 에 기록한다 (pg_config --configure 로도 확인 가능)
-    local CONF_OPTS=(--prefix="${ENGINE_PATH}"
-                     --with-openssl --with-libxml --with-libxslt
-                     --enable-nls --with-python --with-tcl --with-perl)
-    local _skipped=()
+    local CONF_OPTS=(--prefix="${ENGINE_PATH}")
+    local _skipped=() _t _a _b _c
     _has_pc() { pkg-config --exists "$1" 2>/dev/null; }
-    if _has_pc liblz4;     then CONF_OPTS+=(--with-lz4);       else _skipped+=("lz4(lz4-devel)"); fi
-    if _has_pc libzstd;    then CONF_OPTS+=(--with-zstd);      else _skipped+=("zstd(libzstd-devel)"); fi
-    if _has_pc libsystemd; then CONF_OPTS+=(--with-systemd);   else _skipped+=("systemd(systemd-devel)"); fi
-    if _has_pc uuid;       then CONF_OPTS+=(--with-uuid=e2fs); else _skipped+=("uuid-ossp(libuuid-devel)"); fi
-    # PG18+: io_uring (io_method=io_uring). 커널 5.1+ 필요 → 사실상 RHEL9 이상
-    if [[ "${PG_MAJOR}" -ge 18 ]]; then
-        if _has_pc liburing; then CONF_OPTS+=(--with-liburing); else _skipped+=("io_uring(liburing-devel)"); fi
+    local FEAT_FILE="${INSTALLER_DIR}/build_features.txt"
+    if [[ -f "${FEAT_FILE}" ]]; then
+        # pg_download.sh 가 받은 PG 소스의 configure 기준으로 만든 목록
+        #   BASE|옵션  /  FEATURE|이름|옵션|pkg-config
+        while IFS='|' read -r _t _a _b _c; do
+            case "${_t}" in
+                BASE)    CONF_OPTS+=("${_a}") ;;
+                FEATURE) if _has_pc "${_c}"; then CONF_OPTS+=("${_b}"); else _skipped+=("${_a}(${_c})"); fi ;;
+            esac
+        done < <(grep -v '^#' "${FEAT_FILE}")
+    else
+        # build_features.txt 가 없는 구버전 패키지 → 기본 규칙
+        CONF_OPTS+=(--with-openssl --with-libxml --with-libxslt
+                    --enable-nls --with-python --with-tcl --with-perl)
+        if _has_pc liblz4;     then CONF_OPTS+=(--with-lz4);       else _skipped+=("lz4(lz4-devel)"); fi
+        if _has_pc libzstd;    then CONF_OPTS+=(--with-zstd);      else _skipped+=("zstd(libzstd-devel)"); fi
+        if _has_pc libsystemd; then CONF_OPTS+=(--with-systemd);   else _skipped+=("systemd(systemd-devel)"); fi
+        if _has_pc uuid;       then CONF_OPTS+=(--with-uuid=e2fs); else _skipped+=("uuid-ossp(libuuid-devel)"); fi
+        if [[ "${PG_MAJOR}" -ge 18 ]]; then
+            if _has_pc liburing; then CONF_OPTS+=(--with-liburing); else _skipped+=("io_uring(liburing-devel)"); fi
+        fi
     fi
 
     info "PostgreSQL 소스 빌드 중 (make -j${BUILD_CPU})..."
