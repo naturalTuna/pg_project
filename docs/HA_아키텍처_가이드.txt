@@ -283,3 +283,29 @@
 ================================================================
   END OF ARCHITECTURE GUIDE
 ================================================================
+
+
+================================================================
+  부록. HA 에서 백업 복구 (pitr_restore.sh)
+================================================================
+
+  pitr_restore.sh 는 Patroni 가 떠 있으면 실행을 막는다. HA 는 아래 순서로 복구:
+
+  1) 자동 failover 중지
+       patronictl -c /etc/patroni/patroni.yml pause
+  2) 모든 DB 노드에서 Patroni 중지 (PostgreSQL 도 같이 내려감)
+       sudo systemctl stop patroni
+  3) 복구할 노드(보통 기존 Primary)에서
+       bash <엔진경로>/etc/backup/pitr_restore.sh [--target-time "YYYY-MM-DD HH:MM:SS"]
+     ※ 백업은 백업 서버에, 아카이브는 Primary 에 있으므로 백업 디렉토리를
+        복구 노드로 먼저 복사해야 할 수 있다 (BACK_PATH 와 같은 경로로)
+  4) 복구 확인 후 PostgreSQL 중지 → Patroni 기동 → resume
+       <엔진경로>/bin/pg_ctl -D <DATA> stop -m fast
+       sudo systemctl start patroni
+       patronictl -c /etc/patroni/patroni.yml resume
+  5) Standby 를 새 Primary 기준으로 다시 복제
+       patronictl -c /etc/patroni/patroni.yml reinit <클러스터명> <standby 이름>
+
+  WAL 아카이브 정리 (wal_cleanup.sh) 는 Primary / Standby 양쪽 크론에 등록돼 있다.
+  백업이 없는 노드는 "보관 개수 × 백업 주기 + 1" 일 지난 WAL 을 지운다.
+

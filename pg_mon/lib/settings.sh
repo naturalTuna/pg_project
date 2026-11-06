@@ -47,16 +47,15 @@ ORDER BY metric_name")
 
         ui_section "Collector 상태"
         local collector_pid
-        if [[ -f "${PGMON_HOME}/conf/.collector_${idx}.pid" ]]; then
-            collector_pid=$(cat "${PGMON_HOME}/conf/.collector_${idx}.pid" 2>/dev/null)
-            if kill -0 "$collector_pid" 2>/dev/null; then
-                printf "  ${C_BGREEN}● 실행 중  (PID: %s)${C_RESET}\n" "$collector_pid"
-            else
-                printf "  ${C_BRED}✘ 중지됨 (PID 파일은 있음: %s)${C_RESET}\n" "$collector_pid"
-                rm -f "${PGMON_HOME}/conf/.collector_${idx}.pid"
-            fi
+        if collector_pid=$(cc_pid "$nick"); then
+            printf "  ${C_BGREEN}● 실행 중  (PID: %s)${C_RESET}  ${C_DIM}pgmon 을 종료해도 계속 수집${C_RESET}\n" "$collector_pid"
         else
             printf "  ${C_BYELLOW}⚠ Collector 미실행${C_RESET}\n"
+        fi
+        if crontab -l 2>/dev/null | grep -qF "pgmon_ctl.sh watchdog"; then
+            printf "  ${C_DIM}상시 유지: crontab 등록됨 (재부팅 자동 시작 + 5분 watchdog)${C_RESET}\n"
+        else
+            printf "  ${C_DIM}상시 유지: 미등록 — bash %s/pgmon_ctl.sh cron-install${C_RESET}\n" "${PGMON_HOME}"
         fi
 
         ui_footer
@@ -103,19 +102,17 @@ WHERE db_id=${db_id:-0}" > /dev/null
                 fi
                 ;;
             t)
-                # Collector 시작/중지
-                if [[ -f "${PGMON_HOME}/conf/.collector_${idx}.pid" ]]; then
-                    collector_pid=$(cat "${PGMON_HOME}/conf/.collector_${idx}.pid")
-                    if kill -0 "$collector_pid" 2>/dev/null; then
-                        kill "$collector_pid"
-                        rm -f "${PGMON_HOME}/conf/.collector_${idx}.pid"
-                        printf "\n  ${C_BYELLOW}Collector 중지됨${C_RESET}\n"; sleep 1
-                    fi
+                # Collector 시작/중지 (중지하면 watchdog 재기동 대상에서도 빠짐)
+                if cc_is_running "$nick"; then
+                    cc_stop "$idx"
+                    printf "\n  ${C_BYELLOW}Collector 중지됨${C_RESET}\n"; sleep 1
                 else
-                    bash "${PGMON_HOME}/collector/collect.sh" "$idx" \
-                        >> "${PGMON_HOME}/conf/collector_${nick}.log" 2>&1 &
-                    echo $! > "${PGMON_HOME}/conf/.collector_${idx}.pid"
-                    printf "\n  ${C_BGREEN}Collector 시작됨${C_RESET}\n"; sleep 1
+                    if cc_start "$idx"; then
+                        printf "\n  ${C_BGREEN}Collector 시작됨${C_RESET}\n"
+                    else
+                        printf "\n  ${C_BRED}Collector 시작 실패 — conf/collector_%s.log 확인${C_RESET}\n" "$nick"
+                    fi
+                    sleep 1
                 fi
                 ;;
         esac

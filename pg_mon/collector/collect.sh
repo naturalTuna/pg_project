@@ -43,6 +43,18 @@ DB_ID=$(_rpsql "SELECT db_id FROM pgmon.registered_db WHERE nickname='${NICK}'")
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [collector:${NICK}] $*"; }
 
+# ── 같은 DB collector 중복 실행 방지 (flock) ─────────────────
+mkdir -p "${PGMON_HOME}/conf/run"
+exec 9> "${PGMON_HOME}/conf/run/collector_${NICK}.lock"
+if ! flock -n 9; then
+    log "이미 실행 중인 collector 가 있어 종료합니다"
+    exit 0
+fi
+
+# ── 알림 발송 (conf/notify.conf) ─────────────────────────────
+# shellcheck source=../lib/notify.sh
+source "${PGMON_HOME}/lib/notify.sh"
+
 # ── 수집 주기 조회 ────────────────────────────────────────────
 get_interval() {
     local metric=$1
@@ -534,11 +546,17 @@ ORDER BY db_id DESC NULLS LAST LIMIT 1")
     fi
 
     [[ -z "$severity" ]] && {
-        # 기존 미해결 alert 자동 해소
-        _rpsql_exec "
-UPDATE pgmon.alert_history
-SET resolved_at=now()
-WHERE db_id=${DB_ID} AND metric_name='${metric}' AND resolved_at IS NULL" 2>/dev/null || true
+        # 기존 미해결 alert 자동 해소 → 해소된 게 있으면 RESOLVED 알림
+        local resolved
+        # CTE 로 감싸서 SELECT 결과만 받는다 (UPDATE ... RETURNING 은 psql 이 "UPDATE n" 태그도 출력)
+        resolved=$(_rpsql "
+WITH r AS (
+  UPDATE pgmon.alert_history
+  SET resolved_at=now()
+  WHERE db_id=${DB_ID} AND metric_name='${metric}' AND resolved_at IS NULL
+  RETURNING severity
+) SELECT severity FROM r LIMIT 1" 2>/dev/null)
+        [[ -n "$resolved" ]] && notify_alert RESOLVED "$NICK" "$resolved" "$metric" "$val" "-" "${detail}"
         return
     }
 
@@ -555,7 +573,9 @@ INSERT INTO pgmon.alert_history
     (db_id, metric_name, severity, current_value, threshold, message)
 VALUES
     (${DB_ID}, '${metric}', '${severity}', ${val}, ${threshold},
-     '${metric} = ${val} (임계값: ${threshold})${detail:+ — ${detail}}')" 2>/dev/null || true
+     '${metric} = ${val} (임계값: ${threshold})${detail:+ — ${detail}}')" 2>/dev/null \
+        && notify_alert FIRED "$NICK" "$severity" "$metric" "$val" "$threshold" "${detail}"
+    return 0
 }
 
 # ── 메인 루프 ─────────────────────────────────────────────────
