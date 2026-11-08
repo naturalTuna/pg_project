@@ -23,6 +23,8 @@ pg_project/
 │   │   ├── common.sh           ←   출력 함수, conf 생성, rpm 설치, PG / extension 빌드
 │   │   ├── input.sh            ←   실행 옵션(-c/-y), 입력값 수집, 설정 확인, 로그 초기화
 │   │   ├── backup.sh           ←   백업 / WAL 정리 / 복구 스크립트 생성·배포
+│   │   ├── vip.sh              ←   HA VIP (Patroni callback + 보정 cron + etcd 서버 감시자)
+│   │   ├── ha_safety.sh        ←   HA 안전장치 (watchdog / failsafe_mode / synchronous_mode)
 │   │   ├── single.sh           ←   single 모드 설치
 │   │   └── ha.sh               ←   ha 모드 설치 (etcd + Patroni)
 │   ├── install.conf.sample     ← 무인 설치 응답 파일 샘플
@@ -37,6 +39,8 @@ pg_project/
 ├── extensions/
 │   └── manifest.json           ← extension 카탈로그 (git 소스 다운로드 대상 관리)
 └── docs/
+    ├── 설치가이드.txt / .pdf     ← 아키텍처, 사전 준비, 설치, 설치 후 확인, HA 테스트 시나리오
+    ├── 운영가이드.txt / .pdf     ← 일상 점검, Patroni / VIP / 안전장치 / 백업 / pgmon 운영, 장애 대응
     ├── HA_아키텍처_가이드.txt    ← 3노드 Patroni + etcd 구성 / failover 동작
     ├── patroni_운영가이드.txt    ← patronictl 운영 명령 모음
     └── pgmon_가이드.txt          ← pgmon 설치 / 화면별 사용법 / 트러블슈팅
@@ -236,6 +240,59 @@ bash postgresql_install.sh -c install.conf -y     # 완전 무인 — 없는 항
 | 2) 3노드 (권장) | etcd 서버 + Primary + Standby 에 etcd 설치 | 1대 장애에도 quorum 유지. 세 서버 간 2379/2380 포트 허용 필요 |
 
 3노드면 `patroni.yml` 의 `etcd3.hosts` 에 세 노드가 모두 들어갑니다.
+
+**안전장치 (split-brain / 데이터 유실 방지)** — 입력 단계에서 선택
+
+| 항목 | 기본 | 역할 |
+|---|---|---|
+| watchdog (softdog) | `automatic` | Patroni 가 멈추면(hang / VM 정지) 커널이 노드를 리부트 = 펜싱. 멈춘 구 Primary 가 깨어나 P-P 가 되는 것을 막음. `required` 면 watchdog 없이는 리더가 안 됨 |
+| failsafe_mode | `true` | etcd 전체 장애 시에도 Primary 가 모든 멤버와 REST 로 통신되면 Primary 유지 (없으면 etcd 장애 = 쓰기 중단). Patroni 3.0+ |
+| synchronous_mode | `false` | 켜면 failover 시 데이터 유실 0, 대신 커밋 지연 증가. Standby 장애 시 Patroni 가 비동기로 내려 서비스는 계속 |
+
+watchdog 은 설치 시 각 DB 노드에 `softdog` 모듈(부팅 시 자동 로드) 과 `/dev/watchdog` 권한(udev 규칙) 을 sudo 로 설정합니다.
+이미 설치된 클러스터는 `patronictl edit-config` 로 `failsafe_mode` / `synchronous_mode` 를 바꿀 수 있습니다.
+
+**VIP (선택, Primary 를 따라 이동)**
+
+입력 단계에서 `VIP 사용 [y/N]` 에 y 를 넣으면 VIP 주소 / prefix / 인터페이스를 묻고, 앱은 VIP 하나로 접속하면 됩니다.
+(응답 파일: `HA_VIP_USE=y`, `HA_VIP=`, `HA_VIP_PREFIX=24`, `HA_VIP_IFACE=`)
+
+| 구성 요소 | 동작 |
+|---|---|
+| `etc/patroni/vip_callback.sh` | `patroni.yml` 의 `callbacks` (on_start / on_stop / on_restart / on_role_change) 로 등록. 역할이 primary 가 되면 `ip addr add` + `arping -U` (gratuitous ARP), 그 외에는 `ip addr del` — **즉시 반응** |
+| `etc/patroni/vip_check.sh` | 실행 계정 crontab 매분, 내부 20초 간격 3회. 자기 노드 REST `/primary` 가 200 이면 VIP 보장, 503 이면 제거, 무응답이 2회 연속이면 제거 — callback 이 누락돼도 **최대 약 20~40초 안에 보정** |
+| `~/pgvip/vip_watch.sh` (etcd 서버) | **감시자**. 20초마다 두 노드의 리더 여부(REST) 와 VIP 위치(SSH) 를 교차 확인 → 어긋나면 해당 노드의 `vip_check.sh --once` 를 원격 실행하고 알림. 판단은 항상 노드 로컬 기준 |
+
+Primary 서버가 죽으면: leader key 만료(ttl 30초) → Standby 승격 → Standby 의 `on_role_change primary` callback 이 VIP 를 붙이고 arping.
+etcd 서버가 죽어도 DB 노드 쪽 callback / vip_check 는 그대로 동작합니다 (감시와 알림만 멈춤).
+
+`vip_watch.sh` 알림 (상태는 2회 연속 같을 때만 발송, 정상 복귀 시 RESOLVED)
+
+| 상태 | 등급 | 의미 / 조치 |
+|---|---|---|
+| `LEADER_CHANGED` | WARN | failover / switchover 발생 (즉시) |
+| `VIP_FIXED` | WARN | 감시자가 보정함 → callback 이 누락됐다는 뜻이므로 노드 `vip.log` 확인 |
+| `VIP_FIX_FAILED` | CRIT | 보정하려는데 SSH 불가 |
+| `MULTI_LEADER` | CRIT | REST 기준 리더가 둘 — split-brain 의심. VIP 는 건드리지 않음, 즉시 확인 |
+| `NO_LEADER` | CRIT | 리더 없음 — failover 진행 중이거나 etcd / Patroni 장애 |
+| `NODE_UNREACHABLE` | WARN | 노드에 SSH 불가 (VIP 위치 확인 못 함) |
+| `VIP_NO_PING` | WARN | 위치는 맞는데 VIP 가 ping 응답 없음 (ARP / 방화벽). ICMP 를 막는 환경이면 `VIP_PING="n"` |
+
+알림 채널은 `vip_watch.sh` 상단 `PGMON_HOME` 에 pgmon 경로를 넣으면 pgmon `conf/notify.conf` 설정(log / command / webhook) 을 그대로 씁니다. 비워두면 `~/pgvip/vip_watch.log` 에만 기록.
+
+- VIP 는 노드 IP 가 있는 인터페이스에 `<dev>:pgvip` 라벨로 붙습니다 (`HA_VIP_IFACE` 로 지정 가능).
+- 두 스크립트는 같은 lock(`/tmp/pgvip_<클러스터>.lock`) 으로 직렬화되어 동시에 add/del 하지 않습니다.
+- 로그: 각 노드 `${LOG_PATH}/vip.log`. 설치 마지막에 VIP 가 어느 노드에 붙었는지 확인해서 출력합니다.
+- 필요 패키지: `iproute`, `iputils`(arping), `curl` — pre-flight 에서 점검합니다.
+- sudo 를 좁히고 싶으면 `postgres ALL=(root) NOPASSWD: /usr/sbin/ip, /usr/sbin/arping` 만 있어도 VIP 는 동작합니다
+  (단, 설치 스크립트 자체는 rpm 설치 등으로 더 넓은 sudo 가 필요).
+
+한계 (운영 전 알고 있어야 할 것):
+- 같은 L2 서브넷 안에서만 동작합니다. 클라우드(AWS/GCP 등)는 ARP 기반 VIP 가 안 되므로 LB / DNS 를 쓰세요.
+- 네트워크만 끊긴 Primary 는 etcd 에 leader key 를 갱신하지 못해 Patroni 가 스스로 demote 하고, 그때 callback / vip_check 가
+  로컬에서 VIP 를 뗍니다.
+- 남는 구멍은 **노드가 통째로 멈춘 경우**(커널 hang, VM 일시정지, Patroni 프로세스 freeze) 입니다. 이때는 아무 스크립트도 돌지 않아
+  VIP 와 Primary 역할이 그대로 남을 수 있습니다. 이건 Patroni watchdog(softdog) 으로 막는 영역입니다.
 
 튜닝된 `postgresql.conf`는 Patroni 기동 후 각 노드의 `postgresql.base.conf`에 적용됩니다.
 `shared_buffers`처럼 재시작이 필요한 항목은 `patronictl restart <클러스터명>` 후에 반영됩니다.
