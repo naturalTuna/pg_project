@@ -21,11 +21,12 @@ set -e
 #    common.sh  출력 함수, conf 생성, rpm 설치, PG / extension 빌드
 #    input.sh   실행 옵션(-c/-y), 입력값 수집, 설정 확인, 로그 초기화
 #    backup.sh  백업 / WAL 정리 / 복구 스크립트 배포
-#    vip.sh     HA VIP (Patroni callback + 보정 cron)
+#    vip.sh     HA VIP (Patroni callback + 보정 cron + etcd 서버 감시자)
+#    ha_safety.sh  HA 안전장치 (watchdog / failsafe_mode / synchronous_mode)
 #    single.sh  single 모드 설치
 #    ha.sh      ha 모드 설치 (etcd + Patroni)
 INSTALL_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib"
-for _m in common input backup vip single ha; do
+for _m in common input backup vip ha_safety single ha; do
     [[ -f "${INSTALL_LIB}/${_m}.sh" ]] || { echo "lib/${_m}.sh 가 없습니다 (${INSTALL_LIB}). 패키지를 다시 확인하세요."; exit 1; }
 done
 
@@ -37,6 +38,8 @@ source "${INSTALL_LIB}/input.sh" "$@"
 source "${INSTALL_LIB}/backup.sh"
 # shellcheck source=lib/vip.sh
 source "${INSTALL_LIB}/vip.sh"
+# shellcheck source=lib/ha_safety.sh
+source "${INSTALL_LIB}/ha_safety.sh"
 
 # shellcheck source=/dev/null
 case "${INSTALL_MODE}" in

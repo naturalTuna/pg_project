@@ -198,6 +198,7 @@ fi
 HA_ETCD_HOST="" ; HA_PRIMARY_HOST="" ; HA_STANDBY_HOST=""
 HA_SSH_PORT="" ; CLUSTER_NAME="" ; ETCD_NODES=1
 HA_VIP_USE="n" ; HA_VIP="" ; HA_VIP_PREFIX="24" ; HA_VIP_IFACE=""
+HA_WATCHDOG="automatic" ; HA_FAILSAFE="y" ; HA_SYNC_MODE="n"
 REPL_USER_HA="" ; REPL_PASS_HA=""
 PRI_CPU="" ; PRI_MEM_GB=""
 SBY_CPU="" ; SBY_MEM_GB=""
@@ -246,6 +247,24 @@ if [[ "${INSTALL_MODE}" == "ha" ]]; then
     else
         HA_VIP_USE="n"
     fi
+
+    # ── 안전장치 (split-brain / 데이터 유실 방지) ───────────
+    echo -e "  ${CYAN}watchdog (Patroni 가 멈추면 노드 자동 리부트 = 펜싱)${NC}"
+    echo -e "    1) automatic  쓸 수 있으면 사용 (권장)"
+    echo -e "    2) required   못 쓰면 리더가 되지 않음"
+    echo -e "    3) off        사용 안 함"
+    read -rp "  선택 [1]: " HA_WATCHDOG_SEL
+    case "${HA_WATCHDOG_SEL}" in
+        2|required) HA_WATCHDOG="required" ;;
+        3|off)      HA_WATCHDOG="off" ;;
+        *)          HA_WATCHDOG="automatic" ;;
+    esac
+    read -rp "  failsafe_mode (etcd 전체 장애 시에도 Primary 유지) [Y/n]: " HA_FAILSAFE
+    HA_FAILSAFE="${HA_FAILSAFE:-y}"; HA_FAILSAFE="${HA_FAILSAFE,,}"; HA_FAILSAFE="${HA_FAILSAFE:0:1}"
+    [[ "${HA_FAILSAFE}" == "n" ]] || HA_FAILSAFE="y"
+    read -rp "  synchronous_mode (데이터 유실 0, 커밋 지연 증가) [y/N]: " HA_SYNC_MODE
+    HA_SYNC_MODE="${HA_SYNC_MODE:-n}"; HA_SYNC_MODE="${HA_SYNC_MODE,,}"; HA_SYNC_MODE="${HA_SYNC_MODE:0:1}"
+    [[ "${HA_SYNC_MODE}" == "y" ]] || HA_SYNC_MODE="n"
 
     read -rp "  PostgreSQL Port [5432]: " PG_PORT
     PG_PORT="${PG_PORT:-5432}"
@@ -377,6 +396,8 @@ echo -e "${BOLD}  ║${NC}  클러스터   : ${CLUSTER_NAME}"
 echo -e "${BOLD}  ║${NC}  etcd 서버  : ${HA_ETCD_HOST}  (etcd ${ETCD_NODES}노드)"
 [[ "${HA_VIP_USE}" == "y" ]] && \
 echo -e "${BOLD}  ║${NC}  VIP        : ${HA_VIP}/${HA_VIP_PREFIX}  (인터페이스: ${HA_VIP_IFACE:-자동})"
+[[ "${INSTALL_MODE}" == "ha" ]] && \
+echo -e "${BOLD}  ║${NC}  안전장치   : watchdog=${HA_WATCHDOG} failsafe=${HA_FAILSAFE} sync=${HA_SYNC_MODE}"
 echo -e "${BOLD}  ║${NC}  Primary    : ${HA_PRIMARY_HOST}  (CPU:${PRI_CPU} / MEM:${PRI_MEM_GB}GB)"
 echo -e "${BOLD}  ║${NC}  Standby    : ${HA_STANDBY_HOST}  (CPU:${SBY_CPU} / MEM:${SBY_MEM_GB}GB)"
 echo -e "${BOLD}  ║${NC}  SSH Port   : ${HA_SSH_PORT}"

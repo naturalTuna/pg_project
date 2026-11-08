@@ -328,6 +328,8 @@ scope: ${CLUSTER_NAME}
 namespace: /db/
 name: primary
 
+$(fn_patroni_watchdog_yaml)
+
 restapi:
   listen: ${HA_PRIMARY_HOST}:8008
   connect_address: ${HA_PRIMARY_HOST}:8008
@@ -341,6 +343,7 @@ bootstrap:
     loop_wait: 10
     retry_timeout: 10
     maximum_lag_on_failover: 1048576
+$(fn_patroni_dcs_safety_yaml)
     postgresql:
       use_pg_rewind: true
       use_slots: true
@@ -499,6 +502,8 @@ scope: ${CLUSTER_NAME}
 namespace: /db/
 name: standby
 
+$(fn_patroni_watchdog_yaml)
+
 restapi:
   listen: ${HA_STANDBY_HOST}:8008
   connect_address: ${HA_STANDBY_HOST}:8008
@@ -512,6 +517,7 @@ bootstrap:
     loop_wait: 10
     retry_timeout: 10
     maximum_lag_on_failover: 1048576
+$(fn_patroni_dcs_safety_yaml)
     postgresql:
       use_pg_rewind: true
       use_slots: true
@@ -601,6 +607,8 @@ RPATRONI_CONF_SBY
 
     # VIP 스크립트는 Patroni 가 처음 기동할 때 callback 을 부를 수 있도록 먼저 배포
     fn_deploy_vip
+    # watchdog(softdog) 은 Patroni 기동 전에 준비돼 있어야 함
+    fn_setup_watchdog
 
     [[ ! -f "${PATRONI_PKGS}" ]] && \
         error "patroni_pkgs.tar.gz 가 없습니다: ${PATRONI_PKGS}"

@@ -33,6 +33,9 @@ PG_PORT=5432
 #HA_VIP=10.0.0.100
 #HA_VIP_PREFIX=24
 #HA_VIP_IFACE=             # 비우면 노드 IP 가 있는 인터페이스 자동
+#HA_WATCHDOG_SEL=1         # watchdog 1=automatic(권장) 2=required 3=off
+#HA_FAILSAFE=y             # etcd 전체 장애 시에도 Primary 유지 (Patroni 3.0+)
+#HA_SYNC_MODE=n            # 동기 복제 (데이터 유실 0, 커밋 지연 증가)
 #REPL_USER_HA=replicator
 #REPL_PASS_HA="change_me"
 #PRI_CPU=

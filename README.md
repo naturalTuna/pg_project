@@ -23,7 +23,8 @@ pg_project/
 │   │   ├── common.sh           ←   출력 함수, conf 생성, rpm 설치, PG / extension 빌드
 │   │   ├── input.sh            ←   실행 옵션(-c/-y), 입력값 수집, 설정 확인, 로그 초기화
 │   │   ├── backup.sh           ←   백업 / WAL 정리 / 복구 스크립트 생성·배포
-│   │   ├── vip.sh              ←   HA VIP (Patroni callback + 보정 cron)
+│   │   ├── vip.sh              ←   HA VIP (Patroni callback + 보정 cron + etcd 서버 감시자)
+│   │   ├── ha_safety.sh        ←   HA 안전장치 (watchdog / failsafe_mode / synchronous_mode)
 │   │   ├── single.sh           ←   single 모드 설치
 │   │   └── ha.sh               ←   ha 모드 설치 (etcd + Patroni)
 │   ├── install.conf.sample     ← 무인 설치 응답 파일 샘플
@@ -237,6 +238,17 @@ bash postgresql_install.sh -c install.conf -y     # 완전 무인 — 없는 항
 | 2) 3노드 (권장) | etcd 서버 + Primary + Standby 에 etcd 설치 | 1대 장애에도 quorum 유지. 세 서버 간 2379/2380 포트 허용 필요 |
 
 3노드면 `patroni.yml` 의 `etcd3.hosts` 에 세 노드가 모두 들어갑니다.
+
+**안전장치 (split-brain / 데이터 유실 방지)** — 입력 단계에서 선택
+
+| 항목 | 기본 | 역할 |
+|---|---|---|
+| watchdog (softdog) | `automatic` | Patroni 가 멈추면(hang / VM 정지) 커널이 노드를 리부트 = 펜싱. 멈춘 구 Primary 가 깨어나 P-P 가 되는 것을 막음. `required` 면 watchdog 없이는 리더가 안 됨 |
+| failsafe_mode | `true` | etcd 전체 장애 시에도 Primary 가 모든 멤버와 REST 로 통신되면 Primary 유지 (없으면 etcd 장애 = 쓰기 중단). Patroni 3.0+ |
+| synchronous_mode | `false` | 켜면 failover 시 데이터 유실 0, 대신 커밋 지연 증가. Standby 장애 시 Patroni 가 비동기로 내려 서비스는 계속 |
+
+watchdog 은 설치 시 각 DB 노드에 `softdog` 모듈(부팅 시 자동 로드) 과 `/dev/watchdog` 권한(udev 규칙) 을 sudo 로 설정합니다.
+이미 설치된 클러스터는 `patronictl edit-config` 로 `failsafe_mode` / `synchronous_mode` 를 바꿀 수 있습니다.
 
 **VIP (선택, Primary 를 따라 이동)**
 
