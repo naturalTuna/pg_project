@@ -39,6 +39,8 @@ pg_project/
 ├── extensions/
 │   └── manifest.json           ← extension 카탈로그 (git 소스 다운로드 대상 관리)
 └── docs/
+    ├── 설치가이드.txt / .pdf     ← 아키텍처, 사전 준비, 설치, 설치 후 확인, HA 테스트 시나리오
+    ├── 운영가이드.txt / .pdf     ← 일상 점검, Patroni / VIP / 안전장치 / 백업 / pgmon 운영, 장애 대응
     ├── HA_아키텍처_가이드.txt    ← 3노드 Patroni + etcd 구성 / failover 동작
     ├── patroni_운영가이드.txt    ← patronictl 운영 명령 모음
     └── pgmon_가이드.txt          ← pgmon 설치 / 화면별 사용법 / 트러블슈팅
