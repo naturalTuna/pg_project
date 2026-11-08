@@ -800,6 +800,8 @@ SAPPLY_CONF
         "${PATRONICTL_BIN} -c ${ENGINE_PATH}/etc/patroni/patroni.yml list" \
         || warn "클러스터 상태 조회 실패. Primary 서버에서 수동 확인:"
     fn_vip_verify
+    fn_deploy_vip_watch
+    [[ "${HA_VIP_USE}" == "y" ]] && bash "${HOME_DIR}/pgvip/vip_watch.sh" --once | sed 's/^/  [vip_watch] /'
 
     # ── 백업 스크립트 배포 ───────────────────────────────────
     fn_deploy_backup
@@ -822,6 +824,8 @@ SAPPLY_CONF
     echo -e "${BOLD}  ║${NC}  Standby   : ${HA_STANDBY_HOST}:${PG_PORT}"
     [[ "${HA_VIP_USE}" == "y" ]] && \
     echo -e "${BOLD}  ║${NC}  VIP       : ${HA_VIP}:${PG_PORT}  ← 앱은 이 주소로 접속 (로그: ${LOG_PATH}/vip.log)"
+    [[ "${HA_VIP_USE}" == "y" ]] && \
+    echo -e "${BOLD}  ║${NC}  VIP 감시  : ${HOME_DIR}/pgvip/vip_watch.sh (이 서버, 로그 vip_watch.log)"
     [[ -n "${BACKUP_HOST}" ]] && \
     echo -e "${BOLD}  ║${NC}  백업 서버 : ${BACKUP_HOST_LABEL} (${BACKUP_HOST})"
     echo -e "${BOLD}  ╠══════════════════════════════════════════════╣${NC}"
