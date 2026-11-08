@@ -24,6 +24,7 @@
      5-8. 설정 (Settings)
      5-9. Report
      5-10. 복제 (Replication)
+     5-11. Collector 상시 실행 / 알림
   6. 키 조작 요약
   7. 파일 구조
   8. 자주 발생하는 문제 (Troubleshooting)
@@ -626,6 +627,28 @@ Alert 발생 현황과 임계값을 관리합니다.
 [ 기존 설치본 ]
   저장소 DB 에 init.sql 을 한 번 다시 실행해야 수집됩니다 (몇 번 돌려도 안전):
     psql -U postgres -d postgres -f pgmon/sql/init.sql
+
+
+----------------------------------------------------------------
+5-11. Collector 상시 실행 / 알림
+----------------------------------------------------------------
+
+collector 는 pgmon 화면을 종료해도 계속 수집한다 (일반 계정 프로세스, root 불필요).
+
+  bash pgmon_ctl.sh status              상태 확인
+  bash pgmon_ctl.sh start [닉네임|all]
+  bash pgmon_ctl.sh stop  [닉네임|all]  (watchdog 재기동 대상에서도 제외)
+  bash pgmon_ctl.sh cron-install        재부팅 자동 시작 + 5분 watchdog 을 사용자 crontab 에 등록
+  bash pgmon_ctl.sh log <닉네임>
+
+  ※ 상시 수집을 하려면 설치 후 cron-install 을 한 번 실행해 두세요.
+
+[ 알림 ]
+  cp conf/notify.conf.sample conf/notify.conf  후 채널 설정
+    log     : conf/alerts.log (기본)
+    command : 메일 / 사내 메신저 스크립트 실행 (내용은 PGMON_* 환경변수)
+    webhook : JSON POST (Slack / Teams 형식)
+  변경 후: bash pgmon_ctl.sh restart
 
 
 ================================================================

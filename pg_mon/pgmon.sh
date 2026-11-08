@@ -13,6 +13,7 @@ export PGMON_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${PGMON_HOME}/lib/ui.sh"
 source "${PGMON_HOME}/lib/init.sh"
 source "${PGMON_HOME}/lib/osmetrics.sh"
+source "${PGMON_HOME}/lib/collector_ctl.sh"
 source "${PGMON_HOME}/lib/dashboard.sh"
 source "${PGMON_HOME}/lib/session.sh"
 source "${PGMON_HOME}/lib/statement.sh"
@@ -40,17 +41,13 @@ _check_deps() {
 
 # ── Cleanup ────────────────────────────────────────────────────
 _cleanup() {
-    # 모든 collector 종료
-    for pidfile in "${PGMON_HOME}"/conf/.collector_*.pid; do
-        [[ -f "$pidfile" ]] || continue
-        local pid; pid=$(cat "$pidfile")
-        kill "$pid" 2>/dev/null || true
-        rm -f "$pidfile"
-    done
+    # collector 는 종료하지 않는다 (백그라운드에서 계속 수집)
     tput cnorm 2>/dev/null || true   # 커서 복원
-    printf "\n${C_DIM}pgmon 종료${C_RESET}\n"
+    printf "\n${C_DIM}pgmon 종료 — collector 는 계속 수집합니다 (상태/중지: bash %s/pgmon_ctl.sh status|stop)${C_RESET}\n" "${PGMON_HOME}"
 }
-trap _cleanup EXIT INT TERM
+trap _cleanup EXIT
+# INT/TERM 은 종료시킨다 (EXIT trap 에서 정리) — 정리만 하고 계속 도는 문제 방지
+trap 'exit 130' INT TERM
 
 # ── 커서 숨기기 ───────────────────────────────────────────────
 tput civis 2>/dev/null || true
@@ -60,13 +57,8 @@ _feature_menu() {
     local idx=$1
     local _pgmon_k1="TARGET_${idx}_NICKNAME"; local nick="${!_pgmon_k1}"
 
-    # Collector 자동 시작 (미실행 시)
-    local pidfile="${PGMON_HOME}/conf/.collector_${idx}.pid"
-    if [[ ! -f "$pidfile" ]] || ! kill -0 "$(cat "$pidfile")" 2>/dev/null; then
-        bash "${PGMON_HOME}/collector/collect.sh" "$idx" \
-            >> "${PGMON_HOME}/conf/collector_${nick}.log" 2>&1 &
-        echo $! > "$pidfile"
-    fi
+    # Collector 자동 시작 (미실행 시) — 터미널과 분리돼 pgmon 종료 후에도 계속 수집
+    cc_is_running "$nick" || cc_start "$idx" >/dev/null || true
 
     while true; do
         ui_header "pgmon  [${nick}]" \

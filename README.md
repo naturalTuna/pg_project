@@ -18,11 +18,18 @@
 pg_project/
 ├── pg_download.sh              ← [인터넷 서버] 패키지 다운로드 + postgresql/ 패키징
 ├── pg_installer/
-│   ├── postgresql_install.sh   ← [폐쇄망 서버] 설치 스크립트 (single / ha)
+│   ├── postgresql_install.sh   ← [폐쇄망 서버] 설치 스크립트 진입점 (single / ha)
+│   ├── lib/                    ← 설치 로직 모듈
+│   │   ├── common.sh           ←   출력 함수, conf 생성, rpm 설치, PG / extension 빌드
+│   │   ├── input.sh            ←   실행 옵션(-c/-y), 입력값 수집, 설정 확인, 로그 초기화
+│   │   ├── backup.sh           ←   백업 / WAL 정리 / 복구 스크립트 생성·배포
+│   │   ├── single.sh           ←   single 모드 설치
+│   │   └── ha.sh               ←   ha 모드 설치 (etcd + Patroni)
 │   ├── install.conf.sample     ← 무인 설치 응답 파일 샘플
 │   └── manifest.json           ← 설치에 필요한 rpm 목록
 ├── pg_mon/                     ← pgmon 모니터링 툴
 │   ├── pgmon.sh                ← 진입점 (TUI)
+│   ├── pgmon_ctl.sh            ← collector 상시 실행 관리 (start / stop / status / watchdog / cron)
 │   ├── lib/                    ← 화면별 모듈 (dashboard, session, statement, vacuum, object, alert, settings, report, replication)
 │   ├── collector/collect.sh    ← 백그라운드 수집 데몬
 │   ├── sql/init.sql            ← 저장소 DB(pgmon) 스키마
@@ -42,6 +49,7 @@ pg_project/
 ```
 postgresql/
 ├── postgresql_install.sh
+├── lib/                        ← 설치 스크립트 모듈 (common / input / backup / single / ha)
 ├── install.conf.sample         ← 무인 설치 응답 파일 샘플
 ├── BUILD_LOCK.txt              ← 이번 다운로드 구성 기록 (--lock 으로 재현)
 ├── VERIFY_REPORT.txt / VERIFY.log   (--verify 시)
@@ -239,14 +247,35 @@ patronictl -c /postgres/app/etc/patroni/patroni.yml list
 patronictl -c /postgres/app/etc/patroni/patroni.yml switchover <클러스터명>
 ```
 
-### 백업
+### 백업 / WAL 아카이브 정리 / 복구
 
-`<엔진경로>/etc/backup/basebackup/` 에 생성됩니다.
+`<엔진경로>/etc/backup/` 아래에 생성됩니다.
 
-- `pg_basebackup.sh` — `pg_basebackup -Ft -z -Xs` 로 백업하고 `BACKUP_KEEP` 개수만 남기고 정리
-- `backup_setup.sh` — 백업 경로 / 주기 / 보관 개수 / 복제 유저를 다시 설정하고 크론을 교체 (끄기도 가능)
+| 스크립트 | 내용 | 실행 |
+|---|---|---|
+| `basebackup/pg_basebackup.sh` | `pg_basebackup -Ft -z -Xs` 백업 → `BACKUP_KEEP` 개수만 보관 → 이 백업의 시작 WAL 을 `WAL_START.txt` 로 기록 → WAL 정리 호출. 실패하면 불완전한 백업 디렉토리 삭제 | 크론 (기본 매일 02:00) |
+| `basebackup/backup_setup.sh` | 백업 경로 / 주기 / 보관 개수 / 복제 유저 재설정, 크론 교체 (끄기도 가능) | 수동 |
+| `wal_cleanup.sh` | 아카이브 WAL 정리 (아래) . `--dry-run` 으로 지울 대상만 확인 | 크론 매일 03:30 + 백업 직후 |
+| `pitr_restore.sh` | 백업 + 아카이브로 복구, 시점 지정 가능 (아래) | 수동 |
 
-ha 모드에서는 스크립트를 양쪽 노드에 모두 깔고, 크론은 선택한 백업 서버에만 등록합니다.
+**WAL 정리 기준** (`wal_cleanup.sh`)
+- 이 서버에 백업이 있으면 → **남아 있는 가장 오래된 백업의 시작 WAL 보다 앞선 파일만** 삭제 (`pg_archivecleanup`). 보관 중인 어느 백업으로든 복구 가능한 WAL 은 남습니다.
+- 이 서버에 백업이 없으면 (ha 에서 다른 노드가 백업하는 경우) → `KEEP_DAYS` 일 지난 WAL 삭제. 기본값 = 보관 개수 × 백업 주기(일) + 1
+- `.history` (타임라인 이력) 는 지우지 않습니다. 로그: `<로그경로>/wal_cleanup.log`
+- `archive_command` 는 `test ! -f <아카이브>/%f && cp %p <아카이브>/%f` (이미 있는 파일 덮어쓰기 방지)
+
+**복구** (`pitr_restore.sh`, single 전용)
+```bash
+bash pitr_restore.sh --list                                  # 백업 목록 (시작 WAL 포함)
+bash pitr_restore.sh                                         # 최신 백업 + 아카이브 끝까지
+bash pitr_restore.sh --target-time "2026-11-06 14:30:00"     # 그 시각까지 (실수 직전으로 되돌리기)
+bash pitr_restore.sh --backup 20261106_020000 --yes          # 특정 백업, 확인 생략
+```
+- PG 중지 → **현재 DATA 는 `<DATA>.before_restore_<시각>` 으로 보존** (지우지 않음) → 백업 풀기 → `restore_command` + `recovery.signal` → 기동 → 복구 완료까지 대기
+- Patroni 가 떠 있으면 중단하고 HA 복구 절차(pause → 전체 stop → Primary 복구 → start/resume → Standby reinit)를 안내합니다.
+- 테이블스페이스를 쓰면 경고만 하고 수동 복원이 필요합니다.
+
+ha 모드에서는 백업 스크립트를 양쪽 노드에 깔고 백업 크론은 선택한 백업 서버에만, WAL 정리 크론은 양쪽 모두 등록합니다 (failover 후 새 Primary 에서도 정리되도록).
 
 ---
 
@@ -275,7 +304,7 @@ bash monitoring/pgmon/pgmon.sh
 
 ### 화면
 
-DB를 고르면 해당 DB의 수집 데몬(`collector/collect.sh`)이 백그라운드로 자동 시작됩니다.
+DB를 고르면 해당 DB의 수집 데몬(`collector/collect.sh`)이 백그라운드로 자동 시작됩니다. **pgmon 화면을 종료해도 collector 는 계속 수집**합니다 (아래 "수집 데몬 상시 실행" 참고).
 
 | 메뉴 | 내용 |
 |---|---|
@@ -289,7 +318,37 @@ DB를 고르면 해당 DB의 수집 데몬(`collector/collect.sh`)이 백그라�
 | 8) Report | 기간별 집계 — summary / cpu / session / lock / vacuum / **repl(복제 지연)** / **growth(테이블 크기 증가)** / statement / alert, CSV 내보내기 |
 | 9) 복제 | primary: 연결된 standby 별 상태·sync·지연(bytes/초) / standby: WAL receiver 상태·미적용 WAL / 복제 슬롯 적체량 / 최근 1시간 지연 추이 |
 
-### 수집 데몬
+### 수집 데몬 상시 실행 (`pgmon_ctl.sh`, root 불필요)
+
+collector 는 일반 계정 프로세스로 돕니다 (systemd 등록 / root 권한 불필요).
+
+```bash
+bash pgmon_ctl.sh status              # 전체 상태 (PID, 상시 여부, 로그 위치, crontab 등록 여부)
+bash pgmon_ctl.sh start [닉네임|all]
+bash pgmon_ctl.sh stop  [닉네임|all]  # watchdog 재기동 대상에서도 빠짐
+bash pgmon_ctl.sh restart [닉네임|all]
+bash pgmon_ctl.sh cron-install        # 사용자 crontab: 재부팅 시 자동 시작 + 5분마다 watchdog
+bash pgmon_ctl.sh log <닉네임> [줄수]
+```
+
+- `setsid` 로 터미널과 분리해서 띄우므로 pgmon 화면 / SSH 세션을 끊어도 계속 수집합니다.
+- 같은 DB 의 collector 는 `flock` 으로 하나만 돕니다 (중복 실행 방지).
+- watchdog: `start` 된(= 계속 돌아야 하는) collector 가 죽어 있으면 다시 띄우고 `conf/watchdog.log` 에 남깁니다. 10MB 넘은 collector 로그는 `.1` 로 회전합니다.
+- 상태 파일: `conf/run/` (pid / want / lock)
+
+### 알림 발송 (틀)
+
+Alert 가 새로 발생(FIRED)하거나 해소(RESOLVED)되면 `conf/notify.conf` 의 채널로 보냅니다 (`conf/notify.conf.sample` 복사해서 사용).
+
+| 채널 | 동작 |
+|---|---|
+| `log` (기본) | `conf/alerts.log` 에 한 줄씩 |
+| `command` | `NOTIFY_COMMAND` 실행, 내용은 환경변수(`PGMON_EVENT`, `PGMON_SEVERITY`, `PGMON_DB`, `PGMON_METRIC`, `PGMON_VALUE`, `PGMON_MESSAGE` …)로 전달 → 메일 / 사내 메신저 스크립트 연결용 |
+| `webhook` | `NOTIFY_WEBHOOK_URL` 로 `{"text": ...}` JSON POST (Slack / Teams 형식). 대상 시스템에 맞게 payload 조정 필요 |
+
+새 채널은 `lib/notify.sh` 에 `_notify_<이름>()` 함수를 추가하고 `NOTIFY_CHANNELS` 에 이름을 넣으면 됩니다. 설정 변경 후 `pgmon_ctl.sh restart`.
+
+### 수집 주기 / 보관
 
 - 메트릭별 주기(기본): dashboard 30초, session 15초, statement 60초, vacuum 120초, lock 15초, replication 15초, object 300초
 - 설정 화면에서 OFF 한 메트릭은 수집하지 않습니다.

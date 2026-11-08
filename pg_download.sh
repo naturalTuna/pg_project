@@ -780,6 +780,8 @@ case "${DOWNLOAD_MON,,}" in
         mkdir -p "${MON_PGMON_DIR}"
         info "pg_mon/ 복사 중 → ${MON_PGMON_DIR}/"
         cp -r "${MODULE_MON}/." "${MON_PGMON_DIR}/"
+        # 개발 환경의 실행 산출물(접속 비번이 든 pgmon.conf, 로그, pid 등)은 패키지에서 제외
+        find "${MON_PGMON_DIR}/conf" -mindepth 1 ! -name '*.sample' -exec rm -rf {} + 2>/dev/null || true
         rm -f "${MON_PGMON_DIR}/manifest.json"
 
         chmod +x "${MON_PGMON_DIR}/pgmon.sh"             2>/dev/null || true
@@ -826,7 +828,10 @@ INSTALL_DEST="${WORK_DIR}/postgresql_install.sh"
 info "postgresql_install.sh 복사 중 → ${INSTALL_DEST}"
 cp "${MODULE_INSTALLER}/postgresql_install.sh" "${INSTALL_DEST}"
 chmod +x "${INSTALL_DEST}"
-info "postgresql_install.sh 복사 완료 → ${INSTALL_DEST}"
+# 설치 로직 모듈 (common / input / backup / single / ha)
+rm -rf "${WORK_DIR}/lib"
+cp -r "${MODULE_INSTALLER}/lib" "${WORK_DIR}/lib"
+info "postgresql_install.sh + lib/ 복사 완료 → ${INSTALL_DEST}, ${WORK_DIR}/lib/"
 if [[ -f "${MODULE_INSTALLER}/install.conf.sample" ]]; then
     cp "${MODULE_INSTALLER}/install.conf.sample" "${WORK_DIR}/install.conf.sample"
     info "무인 설치 응답 파일 샘플 → ${WORK_DIR}/install.conf.sample"
@@ -914,6 +919,9 @@ if [[ "${_has_mon}" == true ]]; then
     echo -e "${BOLD}║${NC}  │   └── MONITORING_README.txt"
 fi
 
+if [[ -d "${WORK_DIR}/lib" ]]; then
+    echo -e "${BOLD}║${NC}  ├── lib/  (설치 스크립트 모듈)"
+fi
 if [[ -d "${WORK_DIR}/tools/pg_tune_ai" ]]; then
     echo -e "${BOLD}║${NC}  ├── tools/"
     echo -e "${BOLD}║${NC}  │   └── pg_tune_ai/"

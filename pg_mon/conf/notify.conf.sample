@@ -1,0 +1,29 @@
+# ============================================================
+#  pgmon 알림 설정 — conf/notify.conf 로 복사해서 사용
+#    cp conf/notify.conf.sample conf/notify.conf
+#  바꾼 뒤 collector 재시작: bash pgmon_ctl.sh restart
+# ============================================================
+
+# 사용할 채널 (콤마 구분): log, command, webhook
+NOTIFY_CHANNELS="log"
+
+# 발송 최소 등급: WARN (WARN+CRIT) | CRIT (CRIT 만)
+NOTIFY_MIN_SEVERITY="WARN"
+
+# 해소(RESOLVED)도 알릴지
+NOTIFY_ON_RESOLVE="true"
+
+# ── command 채널 ────────────────────────────────────────────
+#  아래 명령을 bash -c 로 실행. 내용은 환경변수로 전달됨:
+#    PGMON_EVENT(FIRED/RESOLVED) PGMON_SEVERITY PGMON_DB PGMON_METRIC
+#    PGMON_VALUE PGMON_THRESHOLD PGMON_MESSAGE PGMON_HOST
+#  예) 메일:  'echo "$PGMON_MESSAGE" | mail -s "[pgmon] $PGMON_SEVERITY $PGMON_DB $PGMON_METRIC" dba@example.com'
+#  예) 스크립트: '/home/postgres/bin/send_messenger.sh'
+NOTIFY_COMMAND=""
+
+# ── webhook 채널 ────────────────────────────────────────────
+#  {"text": "..."} JSON 을 POST (Slack / Teams incoming webhook 형식)
+NOTIFY_WEBHOOK_URL=""
+
+# 채널별 타임아웃(초)
+NOTIFY_TIMEOUT=5
