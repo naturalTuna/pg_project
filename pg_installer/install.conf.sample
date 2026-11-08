@@ -29,6 +29,10 @@ PG_PORT=5432
 #HA_STANDBY_HOST=pg-sby
 #HA_SSH_PORT=22
 #ETCD_MODE_SEL=2           # 1=etcd 단일 노드  2=3노드(권장)
+#HA_VIP_USE=y              # VIP 사용 (Primary 를 따라 이동)
+#HA_VIP=10.0.0.100
+#HA_VIP_PREFIX=24
+#HA_VIP_IFACE=             # 비우면 노드 IP 가 있는 인터페이스 자동
 #REPL_USER_HA=replicator
 #REPL_PASS_HA="change_me"
 #PRI_CPU=

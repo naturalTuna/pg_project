@@ -23,6 +23,7 @@ pg_project/
 │   │   ├── common.sh           ←   출력 함수, conf 생성, rpm 설치, PG / extension 빌드
 │   │   ├── input.sh            ←   실행 옵션(-c/-y), 입력값 수집, 설정 확인, 로그 초기화
 │   │   ├── backup.sh           ←   백업 / WAL 정리 / 복구 스크립트 생성·배포
+│   │   ├── vip.sh              ←   HA VIP (Patroni callback + 보정 cron)
 │   │   ├── single.sh           ←   single 모드 설치
 │   │   └── ha.sh               ←   ha 모드 설치 (etcd + Patroni)
 │   ├── install.conf.sample     ← 무인 설치 응답 파일 샘플
@@ -236,6 +237,29 @@ bash postgresql_install.sh -c install.conf -y     # 완전 무인 — 없는 항
 | 2) 3노드 (권장) | etcd 서버 + Primary + Standby 에 etcd 설치 | 1대 장애에도 quorum 유지. 세 서버 간 2379/2380 포트 허용 필요 |
 
 3노드면 `patroni.yml` 의 `etcd3.hosts` 에 세 노드가 모두 들어갑니다.
+
+**VIP (선택, Primary 를 따라 이동)**
+
+입력 단계에서 `VIP 사용 [y/N]` 에 y 를 넣으면 VIP 주소 / prefix / 인터페이스를 묻고, 앱은 VIP 하나로 접속하면 됩니다.
+(응답 파일: `HA_VIP_USE=y`, `HA_VIP=`, `HA_VIP_PREFIX=24`, `HA_VIP_IFACE=`)
+
+| 구성 요소 | 동작 |
+|---|---|
+| `etc/patroni/vip_callback.sh` | `patroni.yml` 의 `callbacks` (on_start / on_stop / on_restart / on_role_change) 로 등록. 역할이 primary 가 되면 `ip addr add` + `arping -U` (gratuitous ARP), 그 외에는 `ip addr del` — **즉시 반응** |
+| `etc/patroni/vip_check.sh` | 실행 계정 crontab 매분, 내부 20초 간격 3회. 자기 노드 REST `/primary` 가 200 이면 VIP 보장, 503 이면 제거, 무응답이 2회 연속이면 제거 — callback 이 누락돼도 **최대 약 20~40초 안에 보정** |
+
+- VIP 는 노드 IP 가 있는 인터페이스에 `<dev>:pgvip` 라벨로 붙습니다 (`HA_VIP_IFACE` 로 지정 가능).
+- 두 스크립트는 같은 lock(`/tmp/pgvip_<클러스터>.lock`) 으로 직렬화되어 동시에 add/del 하지 않습니다.
+- 로그: 각 노드 `${LOG_PATH}/vip.log`. 설치 마지막에 VIP 가 어느 노드에 붙었는지 확인해서 출력합니다.
+- 필요 패키지: `iproute`, `iputils`(arping), `curl` — pre-flight 에서 점검합니다.
+- sudo 를 좁히고 싶으면 `postgres ALL=(root) NOPASSWD: /usr/sbin/ip, /usr/sbin/arping` 만 있어도 VIP 는 동작합니다
+  (단, 설치 스크립트 자체는 rpm 설치 등으로 더 넓은 sudo 가 필요).
+
+한계 (운영 전 알고 있어야 할 것):
+- 같은 L2 서브넷 안에서만 동작합니다. 클라우드(AWS/GCP 등)는 ARP 기반 VIP 가 안 되므로 LB / DNS 를 쓰세요.
+- 네트워크가 끊긴 Primary 는 자기 VIP 를 내려놓을 수 없습니다(REST 무응답 판단도 자기 노드 기준). Patroni 가 해당 노드의
+  PostgreSQL 을 demote 하므로 쓰기는 막히지만, 망 복구 직후 잠깐 VIP 가 두 노드에 보일 수 있고 다음 보정 주기에 정리됩니다.
+  완전한 펜싱이 필요하면 keepalived / watchdog(softdog) 를 추가 검토하세요.
 
 튜닝된 `postgresql.conf`는 Patroni 기동 후 각 노드의 `postgresql.base.conf`에 적용됩니다.
 `shared_buffers`처럼 재시작이 필요한 항목은 `patronictl restart <클러스터명>` 후에 반영됩니다.

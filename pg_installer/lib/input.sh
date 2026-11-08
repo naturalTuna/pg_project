@@ -197,6 +197,7 @@ fi
 # ============================================================
 HA_ETCD_HOST="" ; HA_PRIMARY_HOST="" ; HA_STANDBY_HOST=""
 HA_SSH_PORT="" ; CLUSTER_NAME="" ; ETCD_NODES=1
+HA_VIP_USE="n" ; HA_VIP="" ; HA_VIP_PREFIX="24" ; HA_VIP_IFACE=""
 REPL_USER_HA="" ; REPL_PASS_HA=""
 PRI_CPU="" ; PRI_MEM_GB=""
 SBY_CPU="" ; SBY_MEM_GB=""
@@ -232,6 +233,19 @@ if [[ "${INSTALL_MODE}" == "ha" ]]; then
         2) ETCD_NODES=3 ;;
         *) ETCD_NODES=1 ;;
     esac
+
+    # ── VIP (Primary 를 따라 이동하는 가상 IP) ──────────────
+    read -rp "  VIP 사용 (Primary 를 따라 이동, 앱은 VIP 로 접속) [y/N]: " HA_VIP_USE
+    HA_VIP_USE="${HA_VIP_USE:-n}"; HA_VIP_USE="${HA_VIP_USE,,}"; HA_VIP_USE="${HA_VIP_USE:0:1}"
+    if [[ "${HA_VIP_USE}" == "y" ]]; then
+        read -rp "  VIP 주소 (예: 10.0.0.100): " HA_VIP
+        [[ "${HA_VIP}" =~ ^[0-9]+(\.[0-9]+){3}$ ]] || error "VIP 는 IPv4 주소로 입력해야 합니다: ${HA_VIP}"
+        read -rp "  VIP 서브넷 prefix [24]: " HA_VIP_PREFIX
+        HA_VIP_PREFIX="${HA_VIP_PREFIX:-24}"
+        read -rp "  VIP 인터페이스 (비우면 노드 IP 가 있는 인터페이스 자동) []: " HA_VIP_IFACE
+    else
+        HA_VIP_USE="n"
+    fi
 
     read -rp "  PostgreSQL Port [5432]: " PG_PORT
     PG_PORT="${PG_PORT:-5432}"
@@ -361,6 +375,8 @@ echo -e "${BOLD}  ║${NC}  Port       : ${PG_PORT}"
 else
 echo -e "${BOLD}  ║${NC}  클러스터   : ${CLUSTER_NAME}"
 echo -e "${BOLD}  ║${NC}  etcd 서버  : ${HA_ETCD_HOST}  (etcd ${ETCD_NODES}노드)"
+[[ "${HA_VIP_USE}" == "y" ]] && \
+echo -e "${BOLD}  ║${NC}  VIP        : ${HA_VIP}/${HA_VIP_PREFIX}  (인터페이스: ${HA_VIP_IFACE:-자동})"
 echo -e "${BOLD}  ║${NC}  Primary    : ${HA_PRIMARY_HOST}  (CPU:${PRI_CPU} / MEM:${PRI_MEM_GB}GB)"
 echo -e "${BOLD}  ║${NC}  Standby    : ${HA_STANDBY_HOST}  (CPU:${SBY_CPU} / MEM:${SBY_MEM_GB}GB)"
 echo -e "${BOLD}  ║${NC}  SSH Port   : ${HA_SSH_PORT}"

@@ -109,6 +109,7 @@
     HA_PRIMARY_IP=$(fn_resolve_ip "${HA_PRIMARY_HOST}")
     HA_STANDBY_IP=$(fn_resolve_ip "${HA_STANDBY_HOST}")
     info "IP 확인: etcd=${HA_ETCD_IP} / primary=${HA_PRIMARY_IP} / standby=${HA_STANDBY_IP}"
+    fn_vip_preflight
 
     # ── SSH 연결 및 sudo 권한 확인 ───────────────────────────
     info "SSH 연결 확인 중..."
@@ -384,6 +385,7 @@ postgresql:
   data_dir: ${DATA_PATH}
   bin_dir: ${ENGINE_PATH}/bin
   pgpass: ${HOME_DIR}/.pgpass
+$(fn_patroni_callbacks_yaml)
   authentication:
     replication:
       username: ${REPL_USER_HA}
@@ -554,6 +556,7 @@ postgresql:
   data_dir: ${DATA_PATH}
   bin_dir: ${ENGINE_PATH}/bin
   pgpass: ${HOME_DIR}/.pgpass
+$(fn_patroni_callbacks_yaml)
   authentication:
     replication:
       username: ${REPL_USER_HA}
@@ -595,6 +598,9 @@ RPATRONI_CONF_SBY
     #  Primary 설치 → 기동 → Leader 확인 → Standby 설치 → 기동 → 클러스터 확인
     # ──────────────────────────────────────────────────────────
     phase "PHASE 5  |  Patroni 설치 및 기동"
+
+    # VIP 스크립트는 Patroni 가 처음 기동할 때 callback 을 부를 수 있도록 먼저 배포
+    fn_deploy_vip
 
     [[ ! -f "${PATRONI_PKGS}" ]] && \
         error "patroni_pkgs.tar.gz 가 없습니다: ${PATRONI_PKGS}"
@@ -793,6 +799,7 @@ SAPPLY_CONF
     ssh ${SSH_OPTS} "${HA_PRIMARY_HOST}" \
         "${PATRONICTL_BIN} -c ${ENGINE_PATH}/etc/patroni/patroni.yml list" \
         || warn "클러스터 상태 조회 실패. Primary 서버에서 수동 확인:"
+    fn_vip_verify
 
     # ── 백업 스크립트 배포 ───────────────────────────────────
     fn_deploy_backup
@@ -813,6 +820,8 @@ SAPPLY_CONF
     echo -e "${BOLD}  ║${NC}  etcd      : ${PATRONI_ETCD_HOSTS}"
     echo -e "${BOLD}  ║${NC}  Primary   : ${HA_PRIMARY_HOST}:${PG_PORT}"
     echo -e "${BOLD}  ║${NC}  Standby   : ${HA_STANDBY_HOST}:${PG_PORT}"
+    [[ "${HA_VIP_USE}" == "y" ]] && \
+    echo -e "${BOLD}  ║${NC}  VIP       : ${HA_VIP}:${PG_PORT}  ← 앱은 이 주소로 접속 (로그: ${LOG_PATH}/vip.log)"
     [[ -n "${BACKUP_HOST}" ]] && \
     echo -e "${BOLD}  ║${NC}  백업 서버 : ${BACKUP_HOST_LABEL} (${BACKUP_HOST})"
     echo -e "${BOLD}  ╠══════════════════════════════════════════════╣${NC}"

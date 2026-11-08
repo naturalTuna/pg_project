@@ -309,3 +309,37 @@
   WAL 아카이브 정리 (wal_cleanup.sh) 는 Primary / Standby 양쪽 크론에 등록돼 있다.
   백업이 없는 노드는 "보관 개수 × 백업 주기 + 1" 일 지난 WAL 을 지운다.
 
+
+
+================================================================
+  부록. VIP (Primary 를 따라 이동)
+================================================================
+
+  설치 시 VIP 를 선택하면 두 단계로 VIP 를 관리한다.
+
+  1) 즉시 반응: Patroni callback
+       patroni.yml → postgresql.callbacks.{on_start,on_stop,on_restart,on_role_change}
+       = <엔진경로>/etc/patroni/vip_callback.sh <action> <role> <scope>
+       role 이 primary(master) → ip addr add VIP + arping -U (스위치/클라이언트 ARP 갱신)
+       그 외 / on_stop → ip addr del VIP
+
+  2) 보정: vip_check.sh (실행 계정 crontab 매분, 20초 간격 3회)
+       curl http://<노드>:8008/primary
+         200 → VIP 없으면 추가
+         503 → VIP 있으면 제거
+         무응답 → 2회 연속이면 제거 (Patroni 가 죽어 상대 노드가 승격하는 경우 중복 방지)
+
+  확인 / 수동 조치
+       ip -o -4 addr show | grep pgvip            # 현재 노드에 VIP 가 있는지
+       tail -f <로그경로>/vip.log                  # 추가/제거 이력
+       bash <엔진경로>/etc/patroni/vip_check.sh --once   # 즉시 보정 1회
+
+  switchover 시 흐름
+       patronictl switchover → 기존 primary on_role_change(replica) → VIP 제거
+                             → 새 primary on_role_change(primary) → VIP 추가 + GARP
+       앱은 재접속만 하면 같은 VIP 로 새 primary 에 붙는다.
+
+  주의
+       - 같은 L2 서브넷 전제. 클라우드는 LB / DNS 사용.
+       - 고립된 노드는 스스로 VIP 를 못 내릴 수 있다 → 완전한 펜싱은 watchdog 추가 검토.
+       - VIP 를 다른 장비가 이미 쓰고 있으면 IP 충돌 → 설치 pre-flight 에서 ping 으로 경고.
