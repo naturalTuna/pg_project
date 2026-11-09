@@ -794,6 +794,8 @@ if [[ "${INSTALL_MODE}" == "ha" ]]; then
             || error "patroni / psycopg2-binary 휠이 받아지지 않았습니다. 로그: ${PKG_LOG}"
         # 소스(tar.gz)로만 받아진 패키지(ydiff 등)는 폐쇄망에서 빌드가 안 되므로 여기서 휠로 만든다
         #   (patronictl 은 ydiff 가 없으면 실행 자체가 안 됨)
+        #   setup.py 방식 패키지는 wheel 모듈이 있어야 휠을 만들 수 있다 (없으면 빌드 실패)
+        pip3 install --user -q wheel setuptools >> "${PKG_LOG}" 2>&1 || true
         for _sd in "${PATRONI_TMP}"/*.tar.gz; do
             [[ -f "${_sd}" ]] || continue
             if pip3 wheel --no-deps -w "${PATRONI_TMP}" "${_sd}" >> "${PKG_LOG}" 2>&1; then
@@ -802,6 +804,13 @@ if [[ "${INSTALL_MODE}" == "ha" ]]; then
                 warn "휠 변환 실패: $(basename "${_sd}") (로그: ${PKG_LOG})"
             fi
         done
+        # 그래도 ydiff 휠이 없으면 PyPI 의 최신 ydiff 휠을 받는다
+        #   (Patroni 가 요구하는 범위(<1.5) 밖일 수 있지만 patronictl 은 정상 동작함 — 실서버 확인)
+        if ! ls "${PATRONI_TMP}"/ydiff-*.whl &>/dev/null; then
+            pip3 download --no-deps --only-binary=:all: ydiff --dest "${PATRONI_TMP}" >> "${PKG_LOG}" 2>&1 \
+                && rm -f "${PATRONI_TMP}"/ydiff-*.tar.gz \
+                && warn "ydiff 소스 빌드 실패 → 최신 ydiff 휠로 대체 (patronictl 동작에는 문제 없음)"
+        fi
         ls "${PATRONI_TMP}"/ydiff-*.whl &>/dev/null \
             || error "ydiff 휠이 없습니다 (patronictl 실행에 필요). 로그: ${PKG_LOG}"
         info "Patroni 패키지 다운로드 완료 → ${PATRONI_TMP}/"

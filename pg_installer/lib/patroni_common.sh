@@ -39,7 +39,9 @@ done
 fi
 
 # Patroni 4.x 런타임 의존성 (etcd3gw, dnspython, wcwidth)
-for _pkg in ydiff cdiff etcd3gw dnspython wcwidth; do
+# ydiff 는 Patroni 요구 범위를 벗어난 버전(1.5)일 수 있어 --no-deps 로 따로 설치
+sudo pip3 install --no-index --find-links="${TMP}/patroni_pkgs" --no-deps ydiff 2>/dev/null || true
+for _pkg in cdiff etcd3gw dnspython wcwidth; do
 sudo pip3 install --no-index --find-links="${TMP}/patroni_pkgs" \
     "${_pkg}" 2>/dev/null \
 || sudo pip3 install --no-index --find-links="${TMP}/patroni_pkgs" \
