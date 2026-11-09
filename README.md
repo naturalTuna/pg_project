@@ -1,560 +1,201 @@
-# pg_project — PostgreSQL 오프라인(폐쇄망) 설치 패키저
+# pg_project — 폐쇄망 PostgreSQL 설치 · HA · 백업 · 모니터링 · 튜닝
 
-인터넷이 되는 서버에서 PostgreSQL 설치에 필요한 파일(소스, 의존 rpm, HA 패키지, 모니터링 툴)을
-하나의 `postgresql/` 디렉토리로 모아 두고, 그 디렉토리를 폐쇄망 서버로 옮겨서
-**소스 빌드 → initdb → 기본 튜닝 → 백업 크론**까지 한 번에 설치하는 Bash 스크립트 모음입니다.
+인터넷이 되는 서버에서 설치에 필요한 모든 것(소스, 의존 rpm, extension, HA 패키지, 모니터링/튜닝 툴)을
+`postgresql/` 한 디렉토리로 모으고, 폐쇄망 서버로 옮겨서
+**소스 빌드 → initdb → 튜닝 → 백업 → (HA) Patroni 구성**까지 스크립트 한 번으로 설치합니다.
 
-- **single 모드**: 로컬 서버 1대에 PostgreSQL 설치
-- **ha 모드**: etcd 1대 + Primary / Standby 2대로 Patroni HA 구성 (etcd 서버에서 빌드한 뒤 SSH/scp로 배포)
-- **pgmon**: 터미널(TUI) 기반 PostgreSQL 모니터링 툴 (선택)
-
-대상 OS: RHEL 계열 8/9 (Rocky, Alma 등), x86_64
-
----
-
-## 디렉토리 구조
-
-```
-pg_project/
-├── pg_download.sh              ← [인터넷 서버] 패키지 다운로드 + postgresql/ 패키징
-├── pg_installer/
-│   ├── add_node.sh             ← HA 노드 추가 / DR standby cluster 구성
-│   ├── postgresql_install.sh   ← [폐쇄망 서버] 설치 스크립트 진입점 (single / ha)
-│   ├── lib/                    ← 설치 로직 모듈
-│   │   ├── common.sh           ←   출력 함수, conf 생성, rpm 설치, PG / extension 빌드
-│   │   ├── input.sh            ←   실행 옵션(-c/-y), 입력값 수집, 설정 확인, 로그 초기화
-│   │   ├── backup.sh           ←   백업 / WAL 정리 / 복구 스크립트 생성·배포 (basebackup)
-│   │   ├── pgbackrest.sh       ←   pgBackRest 빌드 / 설정 / 크론 / 복구 스크립트
-│   │   ├── vip.sh              ←   HA VIP (Patroni callback + 보정 cron + etcd 서버 감시자)
-│   │   ├── ha_safety.sh        ←   HA 안전장치 (watchdog / failsafe_mode / synchronous_mode)
-│   │   ├── patroni_common.sh   ←   Patroni 원격 설치 (install / add_node 공용)
-│   │   ├── single.sh           ←   single 모드 설치
-│   │   └── ha.sh               ←   ha 모드 설치 (etcd + Patroni)
-│   ├── install.conf.sample     ← 무인 설치 응답 파일 샘플
-│   └── manifest.json           ← 설치에 필요한 rpm 목록
-├── pg_mon/                     ← pgmon 모니터링 툴
-│   ├── pgmon.sh                ← 진입점 (TUI)
-│   ├── pgmon_ctl.sh            ← collector 상시 실행 관리 (start / stop / status / watchdog / cron)
-│   ├── lib/                    ← 화면별 모듈 (dashboard, session, statement, vacuum, object, alert, settings, report, replication)
-│   ├── collector/collect.sh    ← 백그라운드 수집 데몬
-│   ├── sql/init.sql            ← 저장소 DB(pgmon) 스키마
-│   └── manifest.json           ← pgmon에 필요한 rpm 목록
-├── extensions/
-│   └── manifest.json           ← extension 카탈로그 (git 소스 다운로드 대상 관리)
-└── docs/
-    ├── 설치가이드.txt / .pdf     ← 아키텍처, 사전 준비, 설치, 설치 후 확인, HA 테스트 시나리오
-    ├── 운영가이드.txt / .pdf     ← 일상 점검, Patroni / VIP / 안전장치 / 백업 / pgmon 운영, 장애 대응
-    ├── HA_아키텍처_가이드.txt    ← 3노드 Patroni + etcd 구성 / failover 동작
-    ├── patroni_운영가이드.txt    ← patronictl 운영 명령 모음
-    └── pgmon_가이드.txt          ← pgmon 설치 / 화면별 사용법 / 트러블슈팅
-```
-
-> 이전 버전 레포 `naturalTuna/postgresql` 의 가이드를 옮겨와 현재 코드 기준으로 갱신했습니다.
-
-`pg_download.sh` 실행 후 생성되는 결과물:
-
-```
-postgresql/
-├── postgresql_install.sh
-├── lib/                        ← 설치 스크립트 모듈 (common / input / backup / pgbackrest / single / ha)
-├── install.conf.sample         ← 무인 설치 응답 파일 샘플
-├── BUILD_LOCK.txt              ← 이번 다운로드 구성 기록 (--lock 으로 재현)
-├── VERIFY_REPORT.txt / VERIFY.log   (--verify 시)
-├── PKG/                        ← 의존 rpm (dnf download 결과)
-├── PKG_download.log
-├── installer/
-│   ├── postgresql-<버전>.tar.gz
-│   ├── build_features.txt      ← 이 PG 버전에서 쓸 configure 옵션 (자동 판단)
-│   ├── extensions/             ← source=git extension tarball + 카탈로그
-│   ├── pgbackrest/             ← pgBackRest 소스 tarball + meson/ninja 휠 (백업 선택지)
-│   ├── etcd-v<버전>-linux-amd64.tar.gz   (ha 선택 시)
-│   └── patroni_pkgs.tar.gz              (ha 선택 시)
-├── monitoring/                 (pgmon 선택 시)
-│   ├── pgmon/
-│   └── MONITORING_README.txt
-└── tools/pg_tune/              (규칙 기반 쿼리 튜너 — 항상 포함)
-```
-
----
-
-## 1. 패키지 다운로드 (인터넷 되는 서버)
-
-다운로드 서버는 **설치 대상 서버와 같은 OS/메이저 버전**이어야 합니다 (rpm 의존성, Python 버전이 맞아야 함).
-
-필요 도구: `tar`, `python3`, `wget` 또는 `curl`, `dnf`(sudo 권한)
-
-```bash
-bash pg_download.sh                          # 기본
-bash pg_download.sh --verify                 # + 이 서버에서 시험 빌드로 검증 (아래 참고)
-bash pg_download.sh --lock BUILD_LOCK.txt    # 이전과 같은 구성으로 다시 받기
-```
-
-대화형으로 아래를 묻습니다.
-
-| 항목 | 설명 |
+| | |
 |---|---|
-| PostgreSQL 버전 | endoflife.date에서 지원 중인 버전 표를 보여줌. 기본값은 두 번째로 최신인 메이저의 최신 마이너 |
-| 설치 모드 | `single` / `ha` — ha면 etcd 바이너리와 Patroni pip 패키지까지 받음 |
-| pgmon 포함 | Y면 `pg_mon/`을 `postgresql/monitoring/pgmon/`으로 복사 |
-| 의존 패키지 다운로드 | Y면 각 모듈 `manifest.json`의 `requires.rpm`을 의존성까지 포함해 `PKG/`에 받음 (CRB/PowerTools 자동 활성화) |
+| 대상 OS | RHEL 계열 8/9 (Rocky, Alma), x86_64 |
+| 설치 모드 | `single` (1대) / `ha` (etcd 서버 + Primary + Standby, Patroni) |
+| 백업 | `basebackup` (pg_basebackup + 아카이브) / `pgbackrest` (HA 는 etcd 서버가 저장소) |
+| 운영 도구 | **pgmon** (터미널 모니터링 + 알림) · **pg_tune** (규칙 기반 쿼리 튜너) |
+| 문서 | [`docs/`](docs) — 아키텍처(그림) · 설치 · 운영 · pgmon 가이드 (txt + pdf) |
 
-**진행 순서**: PG 소스 → 빌드 기능 판단 → rpm → extension → (시험 빌드) → HA 패키지 → pgmon / installer / pg_tune 복사 → `BUILD_LOCK.txt`
+---
 
-### 자동 관리 — PG 버전별 패키지 / extension 태그
+## 한눈에 보기
 
-사람이 "PG 몇 버전엔 무슨 패키지" 표를 관리하지 않도록, 받은 PG 소스와 GitHub 태그를 보고 자동으로 정합니다.
+```mermaid
+flowchart LR
+    subgraph NET["인터넷 서버 (설치 서버와 같은 OS)"]
+        D["bash pg_download.sh"] --> P["postgresql/<br/>PG 소스 · rpm · extension<br/>pgBackRest · etcd · Patroni<br/>pgmon · pg_tune"]
+    end
+    P -->|"postgresql.tar.gz 반입"| I
+    subgraph AIR["폐쇄망"]
+        I["bash postgresql_install.sh"] --> S["single<br/>DB 서버 1대"]
+        I --> H["ha<br/>etcd 서버에서 실행 →<br/>Primary / Standby 배포"]
+        H --> A["add_node.sh<br/>3-node / DR"]
+        H --> T["ha_test.sh<br/>동작 테스트 리포트"]
+        S & H --> M["pgmon · pg_tune"]
+    end
+```
 
-**빌드 기능 (rpm)**
-- `pg_installer/manifest.json` 의 `features` 에 `이름 / configure 옵션 / pkg-config / rpm` 만 적어둡니다 (PG 버전 표기 없음).
-- 받은 PG 소스의 `configure` 를 읽어서 **그 버전이 지원하는 옵션만** 골라 rpm 을 받고, `installer/build_features.txt` 를 만듭니다.
-  예) PG17 → `--with-liburing` 이 없으니 io_uring / liburing-devel 자동 제외, PG18 → 포함
-- 설치 스크립트는 `build_features.txt` 를 읽어서, 해당 -devel 이 실제로 설치된 기능만 켭니다.
+### HA 구성
 
-**extension 태그**
-- 카탈로그 `git_ref` 가 `"auto"` 면 GitHub 태그 중 **최신 정식 릴리스**(rc/beta 제외)를 고릅니다. 태그를 직접 적으면 고정입니다.
-- `ref_pattern` 으로 후보를 좁힐 수 있습니다. `{major}` 는 선택한 PG 메이저로 바뀝니다.
-  예) pgaudit `"^{major}\\."` → PG17 이면 `17.x` 중 최신, PG18 이면 `18.x` 중 최신
+```mermaid
+flowchart LR
+    APP["앱 / 클라이언트"] -->|"VIP:5432"| PRI
+    PRI["<b>Primary</b><br/>PostgreSQL · Patroni :8008<br/>VIP 스크립트 · softdog"]
+    SBY["<b>Standby</b><br/>PostgreSQL · Patroni :8008<br/>VIP 스크립트 · softdog"]
+    ETCD["<b>etcd 서버</b><br/>etcd :2379 · vip_watch<br/>pgBackRest 저장소 · pgmon"]
+    PRI -->|"스트리밍 복제"| SBY
+    PRI -.->|"leader key (ttl 30초)<br/>archive-push"| ETCD
+    SBY -.->|"leader key"| ETCD
+```
 
-**BUILD_LOCK.txt (재현)**
-- 매 다운로드마다 PG 버전 / 켜진 기능 / extension 태그 / 시험 빌드 결과 / 받은 rpm 목록을 기록합니다.
-- `bash pg_download.sh --lock BUILD_LOCK.txt` → 같은 PG 버전·기능·extension 태그로 다시 받습니다 (고객사별 동일 구성).
-  rpm 은 기록용이고, 재다운로드 시에는 저장소의 현재 버전을 받습니다.
-- 설치 로그(`pg_install.log`)에도 lock 내용이 남습니다.
+- Primary 가 죽으면 ttl(30초) 후 Standby 가 승격하고 VIP 가 따라옵니다 (약 30~40초).
+- split-brain / 유실 방지: **watchdog**(멈춘 노드 리부트) · **failsafe_mode**(etcd 전체 장애에도 Primary 유지) · **synchronous_mode**(선택, 유실 0).
+- 3-node etcd 를 고르면 DB 노드에도 etcd 가 올라가 etcd 서버 1대 장애에 영향이 없습니다.
 
-### 시험 빌드 (`--verify`, 기본 꺼짐)
+그림으로 자세히: **[docs/아키텍처_가이드.pdf](docs/아키텍처_가이드.pdf)** (전체 흐름, HA 설치 단계, failover 시퀀스, 장애 유형별 동작, VIP 3중 관리, 백업 비교, pgmon / pg_tune 구조, 포트 · 디렉토리)
 
-"받은 구성으로 폐쇄망에서 빌드가 되는가" 를 다운로드 서버에서 미리 확인합니다. **다운로드 서버에 빌드 환경을 설치**하므로 필요할 때만 켜세요.
+---
 
-1. `gcc`, `make`, 받을 -devel 들을 이 서버에 `sudo dnf install`
-2. PG 를 임시 경로에 configure / make / install (설치 스크립트와 같은 옵션 규칙)
-   - 지원은 되는데 -devel 을 못 설치한 기능은 "이 OS 저장소에 없음 → 설치 서버에서도 빠짐" 으로 표시
-3. extension 을 그 PG 로 PGXS 빌드 — **실패하면 이전 태그로 자동 후퇴** (후보 최대 4개), 전부 실패하면 패키지에서 제외
-4. `ldd` / `rpm -qf` 로 런타임 라이브러리 누락 점검
-5. 결과 → `VERIFY_REPORT.txt` (상세 로그 `VERIFY.log`), `BUILD_LOCK.txt` 의 `VERIFY=` 에 기록
+## 빠른 시작
 
-임시 빌드는 끝나면 지웁니다 (설치된 -devel 패키지는 남음). PG 빌드 때문에 수 분 더 걸립니다.
-
-> 시험 빌드는 "컴파일이 되는가" 까지 확인합니다. pgaudit 처럼 PG 메이저와 짝이 정해진 extension 은 다른 메이저 태그도 컴파일은 될 수 있으므로 `ref_pattern` 으로 메이저를 맞춰두세요 (기본 카탈로그는 설정돼 있음).
-
-끝나면 `postgresql/` 디렉토리를 통째로 폐쇄망 서버로 옮깁니다.
+### 1) 패키지 받기 — 인터넷 서버
 
 ```bash
+git clone https://github.com/naturalTuna/pg_project.git && cd pg_project
+bash pg_download.sh                          # PG 버전 / single·ha / pgmon 여부 질문
+bash pg_download.sh --verify                 # (선택) 이 서버에서 시험 빌드까지
+bash pg_download.sh --lock BUILD_LOCK.txt    # (선택) 예전과 같은 구성으로 다시 받기
 tar -czf postgresql.tar.gz postgresql/
 ```
 
----
-
-## 2. 설치 (폐쇄망 서버)
-
-PostgreSQL을 돌릴 OS 계정(예: `postgres`)으로 실행합니다. 이 계정은 sudo 권한이 필요합니다 (rpm 설치, systemd 등록).
+### 2) 설치 — 폐쇄망 서버 (실행 계정, sudo NOPASSWD)
 
 ```bash
-cd postgresql
-bash postgresql_install.sh
+tar -xzf postgresql.tar.gz && cd postgresql
+bash postgresql_install.sh                   # 1) single  /  2) ha (etcd 서버에서)
+bash postgresql_install.sh -c install.conf -y   # 응답 파일로 무인 설치
 ```
 
-### 무인 설치 (응답 파일)
+질문 순서: 모드 → (HA: 클러스터 / 노드 / etcd 구성 / VIP / watchdog · failsafe · sync) → 포트 · 경로 · Locale
+→ **백업 선택 (pgbackrest / basebackup)** → Archive → Backup
 
-같은 구성을 여러 서버 / 고객사에 반복할 때 질문 답을 파일로 넘깁니다.
+HA 사전 조건(SSH 키, sudo, /etc/hosts, 포트)은 pre-flight 가 점검하고 조치 방법을 알려줍니다 → [설치가이드 3장](docs/설치가이드.txt)
+
+### 3) 확인 / 테스트
 
 ```bash
-cp install.conf.sample install.conf && chmod 600 install.conf   # 패스워드가 들어가므로 600
-vi install.conf
-bash postgresql_install.sh -c install.conf        # 파일에 없는 항목만 대화형으로 질문
-bash postgresql_install.sh -c install.conf -y     # 완전 무인 — 없는 항목은 기본값
+patronictl -c /postgres/app/etc/patroni/patroni.yml list   # (HA) Leader 1, Replica streaming
+bash ~/pgvip/vip_watch.sh --once                            # (HA, etcd 서버) 리더 / VIP 위치
+pgbackrest --stanza=<stanza> info                           # (pgBackRest) 백업 상태
+bash ha_test.sh                                             # (HA) switchover / failover / VIP / etcd 정지 테스트 → 리포트
 ```
 
-- 형식은 `변수명=값` (값에 `#`·공백이 있으면 `"..."`). 각 변수는 샘플 파일 주석 참고.
-- 실행 화면에 각 질문과 함께 `(응답파일)` / `(기본값)` 으로 어떤 값이 들어갔는지 표시되고, 설치 로그에도 응답 파일 경로가 남습니다.
-- ha 모드 필수값(호스트, 복제 패스워드 등)이 비어 있으면 `-y` 에서도 오류로 중단합니다.
-
-### 공통 입력 항목
-
-| 항목 | 기본값 | 결과 |
-|---|---|---|
-| 엔진 설치 경로 | `/postgres` | `/postgres/app` 에 설치 |
-| Data 영역 | `/pgdata` | `/pgdata/data`, 로그 `/pgdata/log` |
-| DB Locale | `ko_KR.utf8` | initdb `--locale` (나중에 바꾸려면 재구축) |
-| 백업 선택 | basebackup | `basebackup` (pg_basebackup + cp 아카이브) / `pgbackrest` (아래 **pgBackRest** 참고) |
-| Archive 사용 | Y | basebackup: `/pgbackup/arc`, `archive_command = 'cp %p ...'` / pgbackrest: `archive-push` → 저장소 |
-| Backup 사용 | Y | basebackup: `/pgbackup/back`, pg_basebackup 스크립트 + 크론 / pgbackrest: 저장소 `/pgbackup/pgbackrest`, full/diff 크론 |
-
-### single 모드
-
-1. `PKG/`의 rpm 설치 (`dnf localinstall`)
-2. 소스 빌드 + contrib 설치 (configure 옵션은 아래 **빌드 옵션** 참고)
-   + `installer/extensions/*.tar.gz` (카탈로그 `source=git`) 를 PGXS 로 자동 빌드·설치
-3. `~/.postgresrc` 생성 (`PGHOME`, `PGDATA`, `PGPORT`, alias `pgstart` / `pgstop` / `pglog` 등) 후 `.bashrc`에 연결
-4. CPU / 메모리 입력값 기준으로 `postgresql.conf` 생성 (shared_buffers = 메모리 1/4, effective_cache_size = 3/4 등)
-5. initdb (`--data-checksums`) → pg_hba에 `0.0.0.0/0 scram-sha-256` 추가 → 기동
-6. 백업 사용 시 복제 유저 생성 + 백업 스크립트/크론 등록
-7. `pg_stat_statements` 생성 (public 스키마), `postgres` 스키마 생성 및 `search_path = postgres, public` 설정
-
-### 빌드 옵션 (configure)
-
-`installer/build_features.txt`(pg_download 가 PG 버전에 맞춰 생성)를 따릅니다. 파일이 없는 이전 패키지는 아래 기본 규칙을 씁니다.
-
-| 옵션 | 조건 | 필요한 rpm |
-|---|---|---|
-| `--with-openssl --with-libxml --with-libxslt --enable-nls --with-python --with-tcl --with-perl` | 항상 | openssl/libxml2/libxslt/python3/tcl/perl -devel, gettext |
-| `--with-lz4` | `lz4-devel` 이 설치돼 있으면 | lz4-devel (`wal_compression = lz4`, TOAST lz4 압축) |
-| `--with-zstd` | `libzstd-devel` 이 있으면 | libzstd-devel (`wal_compression = zstd`, pg_basebackup 압축) |
-| `--with-systemd` | `systemd-devel` 이 있으면 | systemd-devel |
-| `--with-uuid=e2fs` | `libuuid-devel` 이 있으면 | libuuid-devel (contrib `uuid-ossp`) |
-| `--with-liburing` | **그 PG 버전이 지원하면(18+)** + `liburing-devel` 이 있으면 | liburing-devel (`io_method = io_uring`, 커널 5.1+ → 사실상 RHEL9) |
-
-- `-devel` 이 없으면 해당 옵션만 빼고 빌드하고, 뺀 목록을 경고로 보여줍니다 (configure 가 통째로 실패하지 않도록).
-- 실제 사용한 옵션은 `<엔진경로>/etc/configure_options.txt` 에 남습니다 (`pg_config --configure` 로도 확인 가능).
-- **마이너 업그레이드는 폐쇄망 서버에서 다시 컴파일**하는 것이므로, 처음 받은 `PKG/`(-devel 포함)와 이 옵션 파일을 보관해두고 같은 옵션으로 configure 하세요.
-
-### 기본 적용되는 설정
-
-- `shared_preload_libraries = 'pg_stat_statements'`, `pg_stat_statements.max = 10000`, `track_io_timing = on`
-  (ha 모드는 `patroni.yml` 의 DCS 파라미터에 들어가서 첫 기동부터 적용) → 설치 직후 pgmon Statement 화면 / pg_tune 바로 사용 가능
-- `lc_messages` 는 서버에 `en_US.utf8` 로케일이 있으면 그걸, 없으면 `C` (없는 로케일을 지정하면 PG 가 기동하지 않음)
-
-### ha 모드
-
-**사전 조건** (스크립트가 pre-flight 단계에서 전부 점검하고, 하나라도 실패하면 조치 방법을 출력하고 중단합니다)
-
-1. 세 서버의 `/etc/hosts`에 etcd / primary / standby 등록
-2. SSH 키 교환: etcd → primary/standby, primary ↔ standby
-3. primary / standby의 실행 계정에 sudo NOPASSWD
-   ```
-   echo 'postgres ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/postgres
-   chmod 440 /etc/sudoers.d/postgres
-   ```
-
-**진행 순서** (etcd 서버에서 실행)
-
-| 단계 | 내용 |
-|---|---|
-| PHASE 1 | etcd 설치 및 systemd 등록 — 단일 노드 또는 3노드 (아래 참고) |
-| PHASE 2 | etcd 서버에서 PostgreSQL 빌드 + extension 빌드 (엔진과 함께 배포됨) |
-| PHASE 3 | Primary: 엔진 scp, rpm 설치, `.postgresrc`, `patroni.yml`, `patroni.service` |
-| PHASE 4 | Standby: 엔진은 Primary → Standby로 scp, 나머지는 Primary와 동일 |
-| PHASE 5 | Patroni 설치(오프라인 wheel) → Primary 기동 → Standby 기동(Patroni가 pg_basebackup으로 클론) → `patronictl list` |
-| PHASE 6 | etcd 서버의 빌드 결과물 삭제 |
-
-**etcd 구성** (입력 단계에서 선택)
-
-| 선택 | 구성 | 비고 |
-|---|---|---|
-| 1) 단일 노드 | etcd 서버 1대 | etcd 서버가 죽으면 Patroni 가 리더를 갱신 못 해 failover 불가 |
-| 2) 3노드 (권장) | etcd 서버 + Primary + Standby 에 etcd 설치 | 1대 장애에도 quorum 유지. 세 서버 간 2379/2380 포트 허용 필요 |
-
-3노드면 `patroni.yml` 의 `etcd3.hosts` 에 세 노드가 모두 들어갑니다.
-
-**안전장치 (split-brain / 데이터 유실 방지)** — 입력 단계에서 선택
-
-| 항목 | 기본 | 역할 |
-|---|---|---|
-| watchdog (softdog) | `automatic` | Patroni 가 멈추면(hang / VM 정지) 커널이 노드를 리부트 = 펜싱. 멈춘 구 Primary 가 깨어나 P-P 가 되는 것을 막음. `required` 면 watchdog 없이는 리더가 안 됨 |
-| failsafe_mode | `true` | etcd 전체 장애 시에도 Primary 가 모든 멤버와 REST 로 통신되면 Primary 유지 (없으면 etcd 장애 = 쓰기 중단). Patroni 3.0+ |
-| synchronous_mode | `false` | 켜면 failover 시 데이터 유실 0, 대신 커밋 지연 증가. Standby 장애 시 Patroni 가 비동기로 내려 서비스는 계속 |
-
-watchdog 은 설치 시 각 DB 노드에 `softdog` 모듈(부팅 시 자동 로드) 과 `/dev/watchdog` 권한(udev 규칙) 을 sudo 로 설정합니다.
-이미 설치된 클러스터는 `patronictl edit-config` 로 `failsafe_mode` / `synchronous_mode` 를 바꿀 수 있습니다.
-
-**노드 추가 / DR 구성 — `add_node.sh`** (etcd 서버에서 실행)
-
-| 방식 | 용도 | 결과 |
-|---|---|---|
-| A) 같은 클러스터에 Standby 추가 | 3노드 HA | Primary / Standby1 / Standby2. failover 후보 여부 선택 (아니오 = `nofailover`) |
-| B) DR standby cluster | 다른 사이트 DR | 새 서버에 자기 etcd + 별도 클러스터. 메인 VIP 를 따라 복제, **자동 승격 없음** |
-
-새 서버에는 사전 구성만 하고 PG 는 설치하지 않습니다 (엔진은 기존 노드에서 복사). 자세한 내용은 `docs/운영가이드` 5-4.
-
-**VIP (선택, Primary 를 따라 이동)**
-
-입력 단계에서 `VIP 사용 [y/N]` 에 y 를 넣으면 VIP 주소 / prefix / 인터페이스를 묻고, 앱은 VIP 하나로 접속하면 됩니다.
-(응답 파일: `HA_VIP_USE=y`, `HA_VIP=`, `HA_VIP_PREFIX=24`, `HA_VIP_IFACE=`)
-
-| 구성 요소 | 동작 |
-|---|---|
-| `etc/patroni/vip_callback.sh` | `patroni.yml` 의 `callbacks` (on_start / on_stop / on_restart / on_role_change) 로 등록. 역할이 primary 가 되면 `ip addr add` + `arping -U` (gratuitous ARP), 그 외에는 `ip addr del` — **즉시 반응** |
-| `etc/patroni/vip_check.sh` | 실행 계정 crontab 매분, 내부 20초 간격 3회. 자기 노드 REST `/primary` 가 200 이면 VIP 보장, 503 이면 제거, 무응답이 2회 연속이면 제거 — callback 이 누락돼도 **최대 약 20~40초 안에 보정** |
-| `~/pgvip/vip_watch.sh` (etcd 서버) | **감시자**. 20초마다 두 노드의 리더 여부(REST) 와 VIP 위치(SSH) 를 교차 확인 → 어긋나면 해당 노드의 `vip_check.sh --once` 를 원격 실행하고 알림. 판단은 항상 노드 로컬 기준 |
-
-Primary 서버가 죽으면: leader key 만료(ttl 30초) → Standby 승격 → Standby 의 `on_role_change primary` callback 이 VIP 를 붙이고 arping.
-etcd 서버가 죽어도 DB 노드 쪽 callback / vip_check 는 그대로 동작합니다 (감시와 알림만 멈춤).
-
-`vip_watch.sh` 알림 (상태는 2회 연속 같을 때만 발송, 정상 복귀 시 RESOLVED)
-
-| 상태 | 등급 | 의미 / 조치 |
-|---|---|---|
-| `LEADER_CHANGED` | WARN | failover / switchover 발생 (즉시) |
-| `VIP_FIXED` | WARN | 감시자가 보정함 → callback 이 누락됐다는 뜻이므로 노드 `vip.log` 확인 |
-| `VIP_FIX_FAILED` | CRIT | 보정하려는데 SSH 불가 |
-| `MULTI_LEADER` | CRIT | REST 기준 리더가 둘 — split-brain 의심. VIP 는 건드리지 않음, 즉시 확인 |
-| `NO_LEADER` | CRIT | 리더 없음 — failover 진행 중이거나 etcd / Patroni 장애 |
-| `NODE_UNREACHABLE` | WARN | 노드에 SSH 불가 (VIP 위치 확인 못 함) |
-| `VIP_NO_PING` | WARN | 위치는 맞는데 VIP 가 ping 응답 없음 (ARP / 방화벽). ICMP 를 막는 환경이면 `VIP_PING="n"` |
-
-알림 채널은 `vip_watch.sh` 상단 `PGMON_HOME` 에 pgmon 경로를 넣으면 pgmon `conf/notify.conf` 설정(log / command / webhook) 을 그대로 씁니다. 비워두면 `~/pgvip/vip_watch.log` 에만 기록.
-
-- VIP 는 노드 IP 가 있는 인터페이스에 `<dev>:pgvip` 라벨로 붙습니다 (`HA_VIP_IFACE` 로 지정 가능).
-- 두 스크립트는 같은 lock(`/tmp/pgvip_<클러스터>.lock`) 으로 직렬화되어 동시에 add/del 하지 않습니다.
-- 로그: 각 노드 `${LOG_PATH}/vip.log`. 설치 마지막에 VIP 가 어느 노드에 붙었는지 확인해서 출력합니다.
-- 필요 패키지: `iproute`, `iputils`(arping), `curl` — pre-flight 에서 점검합니다.
-- sudo 를 좁히고 싶으면 `postgres ALL=(root) NOPASSWD: /usr/sbin/ip, /usr/sbin/arping` 만 있어도 VIP 는 동작합니다
-  (단, 설치 스크립트 자체는 rpm 설치 등으로 더 넓은 sudo 가 필요).
-
-한계 (운영 전 알고 있어야 할 것):
-- 같은 L2 서브넷 안에서만 동작합니다. 클라우드(AWS/GCP 등)는 ARP 기반 VIP 가 안 되므로 LB / DNS 를 쓰세요.
-- 네트워크만 끊긴 Primary 는 etcd 에 leader key 를 갱신하지 못해 Patroni 가 스스로 demote 하고, 그때 callback / vip_check 가
-  로컬에서 VIP 를 뗍니다.
-- 남는 구멍은 **노드가 통째로 멈춘 경우**(커널 hang, VM 일시정지, Patroni 프로세스 freeze) 입니다. 이때는 아무 스크립트도 돌지 않아
-  VIP 와 Primary 역할이 그대로 남을 수 있습니다. 이건 Patroni watchdog(softdog) 으로 막는 영역입니다.
-
-튜닝된 `postgresql.conf`는 Patroni 기동 후 각 노드의 `postgresql.base.conf`에 적용됩니다.
-`shared_buffers`처럼 재시작이 필요한 항목은 `patronictl restart <클러스터명>` 후에 반영됩니다.
-
-클러스터 확인 / 전환:
+### 4) 모니터링 · 튜닝
 
 ```bash
-patronictl -c /postgres/app/etc/patroni/patroni.yml list
-patronictl -c /postgres/app/etc/patroni/patroni.yml switchover <클러스터명>
+bash postgresql_install.sh        # etcd 서버(또는 모니터링 서버)에 single 로 pgmon 저장소 DB
+bash monitoring/pgmon/pgmon.sh    # 최초 실행 시 저장소 초기화 + 대상 DB 등록
+bash monitoring/pgmon/pgmon_ctl.sh cron-install   # 재부팅 자동 시작 + watchdog
+bash monitoring/pgmon/pgmon_check.sh              # 수집 정상 여부 리포트
 ```
 
-### 백업 / WAL 아카이브 정리 / 복구
-
-`<엔진경로>/etc/backup/` 아래에 생성됩니다.
-
-| 스크립트 | 내용 | 실행 |
-|---|---|---|
-| `basebackup/pg_basebackup.sh` | `pg_basebackup -Ft -z -Xs` 백업 → `BACKUP_KEEP` 개수만 보관 → 이 백업의 시작 WAL 을 `WAL_START.txt` 로 기록 → WAL 정리 호출. 실패하면 불완전한 백업 디렉토리 삭제 | 크론 (기본 매일 02:00) |
-| `basebackup/backup_setup.sh` | 백업 경로 / 주기 / 보관 개수 / 복제 유저 재설정, 크론 교체 (끄기도 가능) | 수동 |
-| `wal_cleanup.sh` | 아카이브 WAL 정리 (아래) . `--dry-run` 으로 지울 대상만 확인 | 크론 매일 03:30 + 백업 직후 |
-| `pitr_restore.sh` | 백업 + 아카이브로 복구, 시점 지정 가능 (아래) | 수동 |
-
-**WAL 정리 기준** (`wal_cleanup.sh`)
-- 이 서버에 백업이 있으면 → **남아 있는 가장 오래된 백업의 시작 WAL 보다 앞선 파일만** 삭제 (`pg_archivecleanup`). 보관 중인 어느 백업으로든 복구 가능한 WAL 은 남습니다.
-- 이 서버에 백업이 없으면 (ha 에서 다른 노드가 백업하는 경우) → `KEEP_DAYS` 일 지난 WAL 삭제. 기본값 = 보관 개수 × 백업 주기(일) + 1
-- `.history` (타임라인 이력) 는 지우지 않습니다. 로그: `<로그경로>/wal_cleanup.log`
-- `archive_command` 는 `test ! -f <아카이브>/%f && cp %p <아카이브>/%f` (이미 있는 파일 덮어쓰기 방지)
-
-**복구** (`pitr_restore.sh`, single 전용)
-```bash
-bash pitr_restore.sh --list                                  # 백업 목록 (시작 WAL 포함)
-bash pitr_restore.sh                                         # 최신 백업 + 아카이브 끝까지
-bash pitr_restore.sh --target-time "2026-11-06 14:30:00"     # 그 시각까지 (실수 직전으로 되돌리기)
-bash pitr_restore.sh --backup 20261106_020000 --yes          # 특정 백업, 확인 생략
-```
-- PG 중지 → **현재 DATA 는 `<DATA>.before_restore_<시각>` 으로 보존** (지우지 않음) → 백업 풀기 → `restore_command` + `recovery.signal` → 기동 → 복구 완료까지 대기
-- Patroni 가 떠 있으면 중단하고 HA 복구 절차(pause → 전체 stop → Primary 복구 → start/resume → Standby reinit)를 안내합니다.
-- 테이블스페이스를 쓰면 경고만 하고 수동 복원이 필요합니다.
-
-ha 모드에서는 백업 스크립트를 양쪽 노드에 깔고 백업 크론은 선택한 백업 서버에만, WAL 정리 크론은 양쪽 모두 등록합니다 (failover 후 새 Primary 에서도 정리되도록).
-ha 모드의 `archive_mode` / `archive_command` 는 patroni.yml DCS 파라미터에도 들어가서 **첫 기동부터** 아카이브됩니다.
-
-### pgBackRest (백업 선택 = pgbackrest)
-
-설치 질문 순서: `백업 선택 (pgbackrest / basebackup)` → `Archive 사용` → `Backup 사용` (저장소 경로, stanza, 주기, full 보관 개수)
-
-| | single | ha |
-|---|---|---|
-| 저장소 (repo) | 이 서버 `/pgbackup/pgbackrest` | **etcd 서버** `/pgbackup/pgbackrest` (공유 스토리지 불필요) |
-| WAL | `archive-push` → 로컬 저장소 | 각 DB 노드 `archive-push` → SSH → etcd 서버. failover 후에도 같은 저장소라 WAL 이 안 끊김 |
-| 백업 | 이 서버 크론 | etcd 서버 크론, Standby 에서 파일 복사 (`backup-standby=prefer`, Standby 없으면 Primary) |
-| stanza | `main` | 클러스터 이름 (`pg-cluster`) |
-
-- 설치 위치 (모든 서버 동일): `<엔진경로>/etc/backup/pgbackrest/` — `bin/pgbackrest`, `lib/libpq.so.5`, `conf/pgbackrest.conf`, `log/`, `pgbr_restore.sh`
-  - 소스(`installer/pgbackrest/pgbackrest-<버전>.tar.gz`)를 설치 서버에서 meson 으로 빌드. 실행 파일이 `../lib` 의 libpq 를 쓰므로 엔진을 지운 etcd 서버에서도 동작
-  - 기본 설정 파일 경로가 위 `conf/` 로 컴파일돼 있어 `--config` 없이 `pgbackrest --stanza=... info` 로 사용 (`.postgresrc` 에 PATH 추가)
-- 설치 중 자동: `stanza-create` → `check` → 첫 full 백업 → 크론 (기본: 일요일 02시 full + 월~토 02시 diff, full 2개 보관 — 오래된 백업/WAL 은 pgBackRest 가 자동 정리)
-- ha: DB 노드 → etcd 서버 SSH 키를 자동 등록 (archive-push 경로). Standby 의 `restore_command` 도 저장소의 `archive-get`
-- 한 서버에 여러 stanza 공존 가능 (etcd 서버의 HA 저장소 + pgmon 용 single). 설정 파일은 stanza 섹션 단위로만 갱신
-- `add_node.sh` (3-node) 는 새 노드를 저장소 설정(`pg3-host`)에 자동 추가
-
-```bash
-pgbackrest --stanza=pg-cluster info                       # 백업 목록 / WAL 범위 (etcd 서버 또는 DB 노드)
-pgbackrest --stanza=pg-cluster --type=full backup         # 수동 백업 (저장소 서버 = etcd 서버에서)
-bash <엔진경로>/etc/backup/pgbackrest/pgbr_restore.sh --target-time "2026-11-09 14:30:00"   # PITR (DB 서버)
-```
-- `pgbr_restore.sh`: PG 중지 → 현재 DATA 를 `<DATA>.before_restore_<시각>` 으로 보존(`--delta` 면 그 자리에서 덮어씀) → `pgbackrest restore` → 기동 → 복구 완료 대기. Patroni 가 떠 있으면 HA 절차를 안내하고 중단
-- 패키지: `pg_download.sh` 가 최신 `release/x.y.z` 태그 소스 + 빌드 rpm(meson, ninja-build, bzip2-devel, lz4-devel, libzstd-devel) + meson/ninja pip 휠(대비용)을 받음
-
-### etcd 서버에 single PostgreSQL 이 있을 때 (pgmon 저장소 DB)
-
-HA 를 (재)설치하면 etcd 서버의 같은 엔진 경로에 빌드하고 마지막에 지우기 때문에 기존 single 이 망가졌습니다.
-이제 PHASE 2 전에 기존 엔진을 `<엔진>.ha_keep_<시각>` 으로 옮기고(실행 중이면 중지), PHASE 6 에서 되돌리고 다시 기동합니다. 설치가 중간에 실패해도 되돌립니다. 데이터 디렉토리는 건드리지 않습니다.
+pgmon `3) Statement` 에서 `t` → 번호를 고르면 pg_tune 이 바로 튜닝합니다.
 
 ---
 
-## 3. pgmon (모니터링)
+## 기능 요약
 
-psql + bash만으로 동작하는 터미널 모니터링 툴입니다. 수집 데이터는 별도 저장소 DB(`pgmon`)에 쌓습니다.
+| 영역 | 내용 | 자세히 |
+|---|---|---|
+| 패키징 | 받은 PG 소스의 `configure` 를 읽어 지원 기능(lz4/zstd/uuid/systemd/io_uring)만 켜고 그에 맞는 -devel rpm 만 받음. extension 은 GitHub 최신 정식 태그(메이저 전용 태그 자동). `BUILD_LOCK.txt` 로 재현, `--verify` 로 시험 빌드 | 설치가이드 4 |
+| 설치 | 소스 빌드 + contrib + extension(PGXS), CPU/MEM 기준 `postgresql.conf`, data-checksums, `pg_stat_statements` 기본, `~/.postgresrc` | 설치가이드 6·7 |
+| HA | etcd(1/3-node) + Patroni, REST 로 Leader/Replica 확인하며 단계 진행, archive 설정을 DCS 에 넣어 첫 기동부터 아카이브 | 아키텍처 4~6 |
+| 안전장치 | watchdog(softdog) / failsafe_mode / synchronous_mode 를 설치 때 선택 | 아키텍처 7, 운영가이드 5 |
+| VIP | Patroni callback(즉시) + vip_check(20초 보정) + vip_watch(etcd 서버 감시·알림) | 아키텍처 8, 운영가이드 4 |
+| 백업 | basebackup: 백업 + WAL 정리 + `pitr_restore.sh` / pgBackRest: full·diff·보관 정책·`pgbr_restore.sh`, HA 저장소 = etcd 서버 | 아키텍처 9, 운영가이드 6 |
+| 노드 추가 | `add_node.sh` — A) 3-node (failover 후보 선택) / B) DR standby cluster | 운영가이드 5-4 |
+| 테스트 | `ha_test.sh` T0~T7 자동 + 리포트, `pgmon_check.sh` C1~C7 | 설치가이드 10 |
+| pgmon | psql + bash TUI. 대시보드 · 세션 · Statement · Vacuum · Object · Alert · Report · 복제. collector 상주(root 불필요), 알림 log/command/webhook | pgmon_가이드 |
+| pg_tune | EXPLAIN 규칙 15종 → hypopg 인덱스 검증 → pg_hint_plan 대안 실험 → work_mem/jit 실험 → 추천. python3 표준 라이브러리 + psql | [pg_tune/README.md](pg_tune/README.md) |
 
-필요: `psql`, `bc`
+### 백업 방식 비교
 
-```bash
-bash monitoring/pgmon/pgmon.sh
-```
-
-### 최초 실행
-
-1. 저장소 DB 접속 정보 입력 (기본 `127.0.0.1:5432`, DB `pgmon`, 유저 `pgmon_writer`)
-2. superuser로 `sql/init.sql` 실행 → `pgmon_owner` / `pgmon_writer` / `pgmon_reader` role, `pgmon` DB / 스키마 / 테이블 생성
-   - 기본 role 패스워드는 role 이름과 같습니다. **운영 환경에서는 바로 변경하세요.**
-   - `init.sql`이 DB 이름을 `pgmon`으로 고정해서 만들기 때문에 저장소 DB명은 `pgmon` 그대로 두세요.
-3. 모니터링 대상 DB 등록 → 선택 시 대상 DB에 `pgmon_monitor` role 생성 (`pg_monitor`, `pg_read_all_stats`, `pg_read_server_files` 등 부여)
-   - 등록 시 OS 지표 SSH fallback용 SSH 유저 / 포트도 입력 (기본: 현재 유저 / 22)
-4. 대상 DB에 `pg_stat_statements`, `pg_buffercache`, `pgstattuple` extension 설치 시도
-   - `pg_stat_statements` 는 `shared_preload_libraries` 가 필요합니다. 이 패키지의 `postgresql_install.sh` 로 설치한 DB 는 기본 적용돼 있고, 그 외 DB 는 등록 + 재시작이 필요합니다.
-
-설정은 `pgmon/conf/pgmon.conf` (권한 600)에 저장됩니다.
-
-### 화면
-
-DB를 고르면 해당 DB의 수집 데몬(`collector/collect.sh`)이 백그라운드로 자동 시작됩니다. **pgmon 화면을 종료해도 collector 는 계속 수집**합니다 (아래 "수집 데몬 상시 실행" 참고).
-
-| 메뉴 | 내용 |
-|---|---|
-| 1) 대시보드 | 버전, HA 역할, 세션 수, Long SQL, Lock, WAL 크기, CPU / MEM / SWAP / Disk I/O, 최근 Alert |
-| 2) 세션 | `pg_stat_activity` 목록, 필터(active / idle / idle in tx / long / blocked), 정렬, `k`로 세션 종료 |
-| 3) Statement | `pg_stat_statements` 상위 쿼리 (mean / total / calls / rows / cache hit 정렬), `d` 상세(전체 SQL + 통계), `t` **pg_tune 튜닝**, 통계 리셋 |
-| 4) Vacuum | dead tuple 현황, XID wraparound 위험도, 수동 VACUUM |
-| 5) Object | 테이블 / 인덱스 크기와 사용률, 미사용 인덱스, pgstattuple 기반 bloat |
-| 6) Alert | 활성 Alert, 이력, 임계값(전역 / DB별) 수정, 수동 해소 |
-| 7) 설정 | 메트릭별 수집 주기 / ON·OFF, 보관 기간, collector 시작·중지 |
-| 8) Report | 기간별 집계 — summary / cpu / session / lock / vacuum / **repl(복제 지연)** / **growth(테이블 크기 증가)** / statement / alert, CSV 내보내기 |
-| 9) 복제 | primary: 연결된 standby 별 상태·sync·지연(bytes/초) / standby: WAL receiver 상태·미적용 WAL / 복제 슬롯 적체량 / 최근 1시간 지연 추이 |
-
-### 수집 데몬 상시 실행 (`pgmon_ctl.sh`, root 불필요)
-
-collector 는 일반 계정 프로세스로 돕니다 (systemd 등록 / root 권한 불필요).
-
-```bash
-bash pgmon_ctl.sh status              # 전체 상태 (PID, 상시 여부, 로그 위치, crontab 등록 여부)
-bash pgmon_ctl.sh start [닉네임|all]
-bash pgmon_ctl.sh stop  [닉네임|all]  # watchdog 재기동 대상에서도 빠짐
-bash pgmon_ctl.sh restart [닉네임|all]
-bash pgmon_ctl.sh cron-install        # 사용자 crontab: 재부팅 시 자동 시작 + 5분마다 watchdog
-bash pgmon_check.sh                # 설치 / 수집 정상 여부 점검 리포트 (--alert-test 로 Alert 시험)
-bash pgmon_ctl.sh log <닉네임> [줄수]
-```
-
-- `setsid` 로 터미널과 분리해서 띄우므로 pgmon 화면 / SSH 세션을 끊어도 계속 수집합니다.
-- 같은 DB 의 collector 는 `flock` 으로 하나만 돕니다 (중복 실행 방지).
-- watchdog: `start` 된(= 계속 돌아야 하는) collector 가 죽어 있으면 다시 띄우고 `conf/watchdog.log` 에 남깁니다. 10MB 넘은 collector 로그는 `.1` 로 회전합니다.
-- 상태 파일: `conf/run/` (pid / want / lock)
-
-### 알림 발송 (틀)
-
-Alert 가 새로 발생(FIRED)하거나 해소(RESOLVED)되면 `conf/notify.conf` 의 채널로 보냅니다 (`conf/notify.conf.sample` 복사해서 사용).
-
-| 채널 | 동작 |
-|---|---|
-| `log` (기본) | `conf/alerts.log` 에 한 줄씩 |
-| `command` | `NOTIFY_COMMAND` 실행, 내용은 환경변수(`PGMON_EVENT`, `PGMON_SEVERITY`, `PGMON_DB`, `PGMON_METRIC`, `PGMON_VALUE`, `PGMON_MESSAGE` …)로 전달 → 메일 / 사내 메신저 스크립트 연결용 |
-| `webhook` | `NOTIFY_WEBHOOK_URL` 로 `{"text": ...}` JSON POST (Slack / Teams 형식). 대상 시스템에 맞게 payload 조정 필요 |
-
-새 채널은 `lib/notify.sh` 에 `_notify_<이름>()` 함수를 추가하고 `NOTIFY_CHANNELS` 에 이름을 넣으면 됩니다. 설정 변경 후 `pgmon_ctl.sh restart`.
-
-### 수집 주기 / 보관
-
-- 메트릭별 주기(기본): dashboard 30초, session 15초, statement 60초, vacuum 120초, lock 15초, replication 15초, object 300초
-- 설정 화면에서 OFF 한 메트릭은 수집하지 않습니다.
-- 30초마다 Alert 임계값 체크, 1시간마다 보관 기간(기본 15일) 지난 데이터 삭제
-- Alert 대상: CPU / MEM / SWAP / Lock / idle in tx / long session / **복제 지연(초)** / **슬롯 WAL 적체(MB)** / **테이블 dead ratio(%)** (dead 1,000건 이상 테이블만)
-- 로그: `pgmon/conf/collector_<닉네임>.log`
-
-### DB 서버 OS 지표 (CPU / MEM / SWAP / Disk I/O / 호스트명)
-
-pgmon 서버가 아니라 **대상 DB 서버** 기준으로 수집합니다. 대상 서버의 `/proc`을 1초 간격으로 두 번 읽어 계산하며, 아래 순서로 시도합니다.
-
-1. **DB 접속** — `pg_read_file('/proc/...')`. 모니터링 role에 아래 권한이 필요합니다 (자동생성 모드는 자동 부여).
-   ```sql
-   GRANT pg_read_server_files TO pgmon_monitor;
-   GRANT EXECUTE ON FUNCTION pg_read_file(text) TO pgmon_monitor;
-   ```
-   `pg_read_server_files`는 DB 서버의 파일을 읽을 수 있는 권한입니다. 부담되면 REVOKE 하고 SSH 방식을 쓰세요.
-2. **SSH** — 1번이 안 되면 `ssh <SSH유저>@<대상호스트> cat /proc/...`. pgmon 서버 → DB 서버 키 교환이 필요합니다 (패스워드 입력 안 함).
-3. 둘 다 실패하면 대시보드에 "수집 불가"로 표시되고 collector 로그에 남습니다.
-
-대시보드 `Host Resources` 제목 옆에 어떤 방식으로 가져왔는지 표시됩니다.
-
-### Statement 화면에서 튜닝 (pg_tune 연동)
-
-Statement 목록에서 `t` → 번호 선택 → `pgtune tune` 실행 결과를 바로 보여줍니다 (로그: `pgmon/conf/pgtune_log/`).
-
-- pg_tune 위치: `PGTUNE_CMD` 환경변수 → 패키지의 `tools/pg_tune/` → pgmon 옆 `pg_tune/` → (구) `pg_tune_ai` → PATH 의 `pgtune` 순서로 찾음
-- AI 없이 규칙 진단 + hypopg 가상 인덱스 + pg_hint_plan 실행계획 대안 실험 + work_mem/jit 실험 + 테이블 통계 점검. 자세한 건 [pg_tune/README.md](pg_tune/README.md)
-- hypopg 가 대상 DB 에 없으면 `CREATE EXTENSION hypopg` 할지 물어봄. pg_hint_plan 실험은 superuser 계정일 때만
-- `pg_stat_statements` 는 상수를 `$1`, `$2` 로 바꿔 저장하므로, 파라미터가 있으면 실제 값을 넣은 SQL 을 입력받습니다.
-- 모니터링 계정은 업무 테이블 조회 권한이 없을 수 있어 실행 계정을 따로 물어봅니다.
-- 기본은 `EXPLAIN` 만(쿼리 실행 안 함). `EXPLAIN ANALYZE` 는 확인 후에만 실행합니다.
-- 인덱스 후보 검증에는 대상 DB 에 `hypopg` 가 필요합니다 (카탈로그에서 기본 다운로드 → 설치 시 자동 빌드 → `CREATE EXTENSION hypopg;`).
-
-### 기존 설치본 업그레이드
-
-복제 모니터링용 컬럼 / 테이블이 추가됐습니다. 기존 저장소 DB 에는 `init.sql` 을 한 번 다시 실행하세요 (몇 번 돌려도 안전).
-
-```bash
-psql -U postgres -d postgres -f pgmon/sql/init.sql
-```
-
-기존에 등록된 DB 의 replication 수집 주기는 설정 화면에 안 보여도 기본 60초로 수집됩니다.
+| | basebackup | pgBackRest |
+|---|---|---|
+| 백업 | 매번 전체 (tar.gz) | full / diff / incr, lz4 압축, 병렬 |
+| 보관 정리 | 개수 + `wal_cleanup.sh` | `repo1-retention-full` (자동 expire) |
+| 기본 크론 | 매일 02:00 | 일요일 02:00 full + 월~토 diff |
+| HA 저장 위치 | 각 DB 노드 (백업은 선택한 노드) | **etcd 서버 한 곳** — failover 해도 WAL 이 안 끊김, 공유 스토리지 불필요 |
+| 복구 | `pitr_restore.sh` | `pgbr_restore.sh --target-time / --set / --delta` |
 
 ---
 
-## extension 카탈로그
+## 디렉토리
 
-`extensions/manifest.json`에 extension 목록을 관리합니다.
+```
+pg_project/
+├── pg_download.sh            [인터넷 서버] 패키징
+├── pg_installer/
+│   ├── postgresql_install.sh [폐쇄망] 설치 진입점 (single / ha)
+│   ├── add_node.sh           HA 노드 추가 / DR
+│   ├── ha_test.sh            HA 자동 테스트 + 리포트
+│   ├── install.conf.sample   무인 설치 응답 파일
+│   ├── manifest.json         rpm / configure 기능 목록
+│   └── lib/                  common · input · backup · pgbackrest · vip · ha_safety
+│                             · patroni_common · single · ha
+├── pg_mon/                   pgmon (pgmon.sh, pgmon_ctl.sh, pgmon_check.sh, collector/, sql/)
+├── pg_tune/                  규칙 기반 쿼리 튜너
+├── extensions/manifest.json  extension 카탈로그
+└── docs/
+    ├── 아키텍처_가이드.pdf    그림으로 보는 구성 (+ .html)
+    ├── 설치가이드.txt / .pdf  사전 준비 · 다운로드 · 설치 · 확인 · 테스트 · 문제 해결 · 재설치
+    ├── 운영가이드.txt / .pdf  일상 점검 · Patroni · VIP · 안전장치 · 백업/복구 · 장애 대응
+    ├── pgmon_가이드.txt / .pdf
+    └── src/                  PDF 생성기 (bash docs/src/build_docs.sh)
+```
+
+`pg_download.sh` 결과 (`postgresql/`):
+
+```
+postgresql/
+├── postgresql_install.sh  lib/  add_node.sh  ha_test.sh  install.conf.sample
+├── BUILD_LOCK.txt          구성 기록 (--lock 으로 재현)
+├── PKG/                    의존 rpm
+├── installer/
+│   ├── postgresql-<버전>.tar.gz   build_features.txt
+│   ├── extensions/         hypopg · pg_hint_plan · pgvector + 카탈로그
+│   ├── pgbackrest/         pgBackRest 소스 + meson/ninja 휠
+│   └── etcd-*.tar.gz  patroni_pkgs.tar.gz   (ha)
+├── monitoring/pgmon/
+└── tools/pg_tune/
+```
+
+---
+
+## extension 카탈로그 (`extensions/manifest.json`)
 
 | source | 동작 |
 |---|---|
-| `contrib` | PostgreSQL 소스에 포함 — 빌드 시 contrib와 함께 설치됨 |
-| `git` | `pg_download.sh`가 `https://github.com/<repo>/archive/refs/tags/<태그>.tar.gz` 를 받아 `installer/extensions/`에 넣음. 태그는 `git_ref` (`"auto"` = 최신 정식 릴리스, `ref_pattern` 적용) |
-| `disabled` | 카탈로그에만 등재, 다운로드 안 함 |
+| `contrib` | PG 소스에 포함 — 빌드 시 같이 설치 |
+| `git` | GitHub 태그 tarball 을 받아 설치 때 PGXS 빌드. `git_ref: "auto"` = 최신 정식 릴리스, `ref_pattern` 으로 메이저 전용 태그 선택 (`{major}`) |
+| `disabled` | 카탈로그에만 등재 |
 
-새 extension을 받으려면 항목의 `source`를 `git`으로 바꾸고 `repo` 를 채웁니다. `git_ref` 는 `"auto"` 로 두거나 특정 태그로 고정합니다.
-받은 tarball은 `postgresql_install.sh` 가 PG 빌드 직후 PGXS 로 자동 빌드·설치합니다
-(실패해도 설치는 계속되고, 실패 목록과 `shared_preload_libraries` 등록이 필요한 extension 을 안내합니다).
-기본으로 켜져 있는 것:
+기본으로 받는 것: `hypopg` (pg_tune 인덱스 검증), `pg_hint_plan` (pg_tune 실행계획 실험 / 힌트), `pgvector` (`CREATE EXTENSION vector`, 범용 빌드 `OPTFLAGS=`).
+설치(빌드)만 되고 DB 에는 영향이 없습니다 — 쓰려면 `CREATE EXTENSION`. preload 가 필요한 건 `shared_preload_libraries` 에 넣고 재시작.
 
-| extension | 용도 | 사용 방법 |
-|---|---|---|
-| `hypopg` (auto) | pg_tune 인덱스 후보 가상 검증 | `CREATE EXTENSION hypopg;` |
-| `pg_hint_plan` (auto) | pg_tune 실행계획 대안 실험 / 쿼리 힌트 | 세션 `LOAD 'pg_hint_plan';` (superuser), 앱에서 쓰려면 `shared_preload_libraries` 에 추가 |
-| `pgvector` (auto) | 벡터 타입 / 유사도 검색 (HNSW, IVFFlat) | `CREATE EXTENSION vector;` (이름이 `vector`) |
-
-- **설치(빌드)만 되고 DB 에는 아무 영향이 없습니다.** 쓰려면 해당 DB 에서 `CREATE EXTENSION` 해야 합니다.
-- `pg_cron`, `pgaudit` 등 preload 가 필요한 건 `shared_preload_libraries` 에 안 넣으면 기능만 동작 안 하고 **기동에는 문제 없습니다.**
-  반대로 `shared_preload_libraries` 에 넣었는데 해당 .so 가 없으면 **기동 실패**합니다.
-- `pgaudit` 부하는 설치가 아니라 `pgaudit.log` 설정에 달려 있습니다 (`ddl`, `role` 정도는 가볍고 `read,write`/`all` 은 무거움).
-- 항목별 `make_args` 로 빌드 인자를 줄 수 있습니다. pgvector 는 기본 빌드가 `-march=native`(빌드 서버 CPU 전용)라
-  ha 모드처럼 다른 서버로 복사하면 Illegal instruction 위험이 있어 `OPTFLAGS=` (범용 빌드) 로 설정돼 있습니다.
-
-## manifest.json (모듈별 rpm)
-
-```json
-{
-  "module": "pg_installer",
-  "version": "1.0",
-  "requires": {
-    "rpm": ["gcc", "make", "readline-devel", "..."],
-    "rpm_by_major": { }
-  },
-  "configure_base": ["--with-openssl", "--with-libxml", "..."],
-  "features": [
-    { "name": "lz4",      "configure": "--with-lz4",      "pkgconfig": "liblz4",   "rpm": ["lz4-devel"] },
-    { "name": "io_uring", "configure": "--with-liburing", "pkgconfig": "liburing", "rpm": ["liburing-devel"] }
-  ]
-}
-```
-
-- `requires.rpm` : 항상 받는 rpm. `pg_mon/manifest.json` (pgmon 선택 시) 과 합쳐서 받습니다.
-- `configure_base` : 항상 쓰는 configure 옵션
-- `features` : 선택 기능. 받은 PG 소스가 지원하는 것만 rpm 을 받고 옵션을 켭니다. **새 기능은 한 줄 추가**하면 됩니다.
-- `rpm_by_major` : 기능으로 표현하기 어려운 버전 전용 rpm 이 생기면 `"19": [...]` 처럼 추가 (키 = 최소 메이저). 저장소에 없는 패키지는 건너뜁니다.
-설치에 rpm이 더 필요하면 해당 모듈의 manifest에만 추가하면 됩니다.
+새 rpm / 빌드 기능은 해당 모듈의 `manifest.json` 에 한 줄 추가하면 됩니다 (`requires.rpm`, `features`).
 
 ---
 
-## 보안 관련 기본값 (운영 전 확인)
+## 보안 기본값 — 운영 전 반드시 변경
 
-- single 모드 initdb는 인증 옵션 없이 실행되어 **로컬 접속이 trust**입니다. `postgres` 패스워드를 설정하고 `pg_hba.conf`를 조정하세요.
-- ha 모드 `patroni.yml`의 superuser 패스워드는 `postgres`로 고정되어 있고, 노드 IP 기준 `/24` 대역에 **trust**가 열립니다.
-- pgmon 저장소 role 패스워드 기본값은 role 이름과 같습니다.
+- single: initdb 기본이라 **로컬 접속 trust** → postgres 패스워드 설정, `pg_hba.conf` 조정
+- HA: `patroni.yml` superuser 패스워드 `postgres`, 노드 IP 기준 **/24 trust** → 변경 / 범위 축소
+- pgmon role 패스워드 = role 이름 → 변경
+- 설치 계정 `sudo NOPASSWD: ALL` → 운영 중에는 축소 가능 ([운영가이드 2-1](docs/운영가이드.txt))
+
+## 검증 상태
+
+| 항목 | 상태 |
+|---|---|
+| single 설치, basebackup / pgBackRest 백업 · PITR | 로컬(PG16) 실제 설치·복구 확인 |
+| HA 설치 (Rocky, 3대), VIP, switchover / failover, pgmon 수집 | 실서버 확인 |
+| pgBackRest HA (etcd 서버 저장소), etcd 서버 single PG 보호 | 로컬 시뮬레이션 확인, **실서버 미검증** |
+| watchdog 리부트(T7), 전원 OFF, 전체 재부팅, HA PITR | 실서버 확인 필요 |
+| PG 마이너 업그레이드 | 자동화 안 됨 (운영가이드 11-2 수동 절차) |
