@@ -120,10 +120,13 @@ if [[ ! -f "${PATRONI_PKGS}" ]] && [[ -d "${PATRONI_PKGS_DIR}" ]] && \
 fi
 
 # pg_download.sh 가 의존 rpm을 ${SCRIPT_DIR}/PKG/ 디렉토리 형태로 풀어놓은 경우
-# installer/PKG.tar.gz 가 없으면 여기서 자동으로 압축해서 만들어 준다.
-if [[ ! -f "${PKG_TGZ}" ]] && [[ -d "${PKG_DIR}" ]] && \
-   [[ -n "$(ls -A "${PKG_DIR}" 2>/dev/null)" ]]; then
-    tar -czf "${PKG_TGZ}" -C "${SCRIPT_DIR}" "PKG"
+# installer/PKG.tar.gz 가 없거나, PKG/ 에 rpm 이 추가·변경돼 묶음보다 새로우면 다시 압축한다.
+# (예전 묶음을 그대로 쓰면 PKG 를 보충해도 반영이 안 됨)
+if [[ -d "${PKG_DIR}" ]] && [[ -n "$(ls -A "${PKG_DIR}" 2>/dev/null)" ]]; then
+    if [[ ! -f "${PKG_TGZ}" ]] || \
+       [[ -n "$(find "${PKG_DIR}" -newer "${PKG_TGZ}" -print -quit 2>/dev/null)" ]]; then
+        tar -czf "${PKG_TGZ}" -C "${SCRIPT_DIR}" "PKG"
+    fi
 fi
 
 HA_PKGS_AVAILABLE=false

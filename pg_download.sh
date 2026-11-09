@@ -443,8 +443,9 @@ fi
 
 case "${DOWNLOAD_PKG,,}" in
     y|yes)
-        PKG_TMP="${WORK_DIR}/PKG"
-        mkdir -p "${PKG_TMP}"
+        # dnf --downloaddir 는 상대 경로를 cwd 기준으로 보장하지 않으므로 절대 경로로 넘긴다
+        mkdir -p "${WORK_DIR}/PKG"
+        PKG_TMP="$(cd "${WORK_DIR}/PKG" && pwd)"
         info "의존 패키지를 다운로드합니다..."
         info "다운로드 로그 → ${PKG_LOG}"
         if [[ ${#_ENABLE_OPT[@]} -gt 0 ]]; then
@@ -476,6 +477,16 @@ case "${DOWNLOAD_PKG,,}" in
         info "rpm 파일 ${_pkg_count}개 다운로드 완료 → ${PKG_TMP}/"
         if [[ ${_pkg_count} -eq 0 ]]; then
             warn "rpm 0개 — 저장소 접근 실패 또는 패키지명 오류 가능. ${PKG_LOG} 확인"
+        fi
+        # 빌드 필수 rpm 이 실제로 들어왔는지 확인 (이미 설치돼 있어 안 받아진 경우 포함)
+        _pkg_miss=()
+        for _p in gcc make bison flex readline-devel zlib-devel openssl-devel; do
+            ls "${PKG_TMP}/${_p}"-[0-9]*.rpm &>/dev/null || _pkg_miss+=("${_p}")
+        done
+        if [[ ${#_pkg_miss[@]} -gt 0 ]]; then
+            warn "PKG 에 빌드 필수 rpm 이 없습니다: ${_pkg_miss[*]}"
+            warn "  이 서버에 이미 설치돼 있으면 dnf 가 받지 않습니다. 폐쇄망 서버에 없다면 아래로 직접 받으세요:"
+            warn "  sudo dnf download --resolve --alldeps --destdir=${PKG_TMP} ${_pkg_miss[*]}"
         fi
         ;;
     n|no)
