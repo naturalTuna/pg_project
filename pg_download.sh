@@ -478,16 +478,33 @@ case "${DOWNLOAD_PKG,,}" in
         if [[ ${_pkg_count} -eq 0 ]]; then
             warn "rpm 0개 — 저장소 접근 실패 또는 패키지명 오류 가능. ${PKG_LOG} 확인"
         fi
-        # 빌드 필수 rpm 이 실제로 들어왔는지 확인 (이미 설치돼 있어 안 받아진 경우 포함)
+        # 목록의 rpm 이 PKG 에 실제로 다 들어왔는지 확인하고, 빠진 것은 하나씩 다시 받는다
+        #   (이 서버에 이미 설치된 패키지는 install --downloadonly 가 건너뛰고,
+        #    dnf download 는 목록 중 하나라도 이름을 못 찾으면 전체가 실패하므로 개별 재시도)
         _pkg_miss=()
-        for _p in gcc make bison flex readline-devel zlib-devel openssl-devel; do
+        for _p in "${PKG_LIST[@]}"; do
             ls "${PKG_TMP}/${_p}"-[0-9]*.rpm &>/dev/null || _pkg_miss+=("${_p}")
         done
         if [[ ${#_pkg_miss[@]} -gt 0 ]]; then
-            warn "PKG 에 빌드 필수 rpm 이 없습니다: ${_pkg_miss[*]}"
-            warn "  이 서버에 이미 설치돼 있으면 dnf 가 받지 않습니다. 폐쇄망 서버에 없다면 아래로 직접 받으세요:"
-            warn "  sudo dnf download --resolve --alldeps --destdir=${PKG_TMP} ${_pkg_miss[*]}"
+            info "PKG 에 없는 rpm ${#_pkg_miss[@]}개 개별 재다운로드: ${_pkg_miss[*]}"
+            for _p in "${_pkg_miss[@]}"; do
+                sudo dnf download -y --resolve "${_ENABLE_OPT[@]}" -x '*.i686' \
+                    --destdir="${PKG_TMP}" "${_p}" >> "${PKG_LOG}" 2>&1 || true
+            done
+            _still=()
+            for _p in "${_pkg_miss[@]}"; do
+                ls "${PKG_TMP}/${_p}"-[0-9]*.rpm &>/dev/null || _still+=("${_p}")
+            done
+            if [[ ${#_still[@]} -gt 0 ]]; then
+                warn "끝내 받지 못한 rpm: ${_still[*]}  (저장소 / 패키지명 확인, ${PKG_LOG})"
+                for _p in gcc make bison flex; do
+                    [[ " ${_still[*]} " == *" ${_p} "* ]] && error "빌드 필수 rpm(${_p}) 이 없어 설치가 불가능합니다."
+                done
+            fi
         fi
+        sudo chown -R "$(id -un):$(id -gn)" "${PKG_TMP}" 2>/dev/null || true
+        _pkg_count=$(find "${PKG_TMP}" -name "*.rpm" 2>/dev/null | wc -l)
+        info "PKG 최종 rpm ${_pkg_count}개"
         ;;
     n|no)
         warn "패키지 다운로드를 건너뜁니다."
