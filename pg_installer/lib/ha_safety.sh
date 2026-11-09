@@ -31,10 +31,12 @@ fn_patroni_watchdog_yaml() {
 }
 
 # DB 노드에 softdog 준비: 모듈 로드(부팅 시 자동) + /dev/watchdog 를 실행 계정 소유로
+#   인자: 대상 호스트들 (생략 시 Primary / Standby)
 fn_setup_watchdog() {
     [[ "${HA_WATCHDOG:-automatic}" == "off" ]] && { info "watchdog: 사용 안 함 (off)"; return 0; }
-    local _h _ok
-    for _h in "${HA_PRIMARY_HOST}" "${HA_STANDBY_HOST}"; do
+    local _h _ok _hosts=("$@")
+    [[ ${#_hosts[@]} -eq 0 ]] && _hosts=("${HA_PRIMARY_HOST}" "${HA_STANDBY_HOST}")
+    for _h in "${_hosts[@]}"; do
         ssh ${SSH_OPTS} "${_h}" bash >> "${HA_LOG}" 2>&1 <<'RWD'
 _u=$(id -un)
 echo softdog | sudo tee /etc/modules-load.d/softdog.conf >/dev/null
