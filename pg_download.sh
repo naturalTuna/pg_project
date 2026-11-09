@@ -148,8 +148,11 @@ pat, major = sys.argv[1], sys.argv[2]
 pat = pat.replace("{major}", major) if pat else ""
 stable = re.compile(r"^v?\d+(\.\d+)*$")
 tags = [t.strip() for t in sys.stdin if t.strip()]
-tags = [t for t in tags if stable.match(t) and (not pat or re.search(pat, t))]
-key = lambda t: tuple(int(x) for x in t.lstrip("v").split("."))
+if pat:   # 패턴이 있으면 패턴에 맞는 태그 (REL18_1_8_1 같은 비숫자 태그 포함)
+    tags = [t for t in tags if re.search(pat, t) and not t.endswith("^{}")]
+else:
+    tags = [t for t in tags if stable.match(t)]
+key = lambda t: tuple(int(x) for x in re.findall(r"\d+", t))
 for t in sorted(set(tags), key=key, reverse=True)[:4]:
     print(t)
 ' "$1" "$2"
@@ -283,16 +286,11 @@ else
     DOWNLOAD_MON="n"
 fi
 
-# ── pg_tune_ai 포함 여부 ────────────────────────────────────
-#   PG_TUNE_AI_DIR 환경변수 또는 이 레포 옆(../pg_tune_ai)에 있으면 함께 패키징
-PG_TUNE_AI_SRC="${PG_TUNE_AI_DIR:-${SCRIPT_DIR}/../pg_tune_ai}"
+# ── pg_tune (규칙 기반 쿼리 튜닝, 레포 내장) ───────────────
+#   항상 패키징 (python3 표준 라이브러리 + psql 만 사용, 추가 설치 없음)
+PG_TUNE_SRC="${SCRIPT_DIR}/pg_tune"
 DOWNLOAD_TUNE="n"
-if [[ -f "${PG_TUNE_AI_SRC}/pgtune.py" ]]; then
-    PG_TUNE_AI_SRC="$(cd "${PG_TUNE_AI_SRC}" && pwd)"
-    echo ""
-    read -rp "  pg_tune_ai 튜닝 도구도 함께 패키징 하시겠습니까? [Y/n]: " DOWNLOAD_TUNE
-    DOWNLOAD_TUNE="${DOWNLOAD_TUNE:-y}"
-fi
+[[ -f "${PG_TUNE_SRC}/pgtune.py" ]] && DOWNLOAD_TUNE="y"
 
 echo ""
 echo -e "${BOLD}╔══════════════════════════════════════════════╗${NC}"
@@ -306,7 +304,7 @@ else
 echo -e "${BOLD}║${NC}  pgmon      : N"
 fi
 if [[ "${DOWNLOAD_TUNE,,}" =~ ^(y|yes)$ ]]; then
-echo -e "${BOLD}║${NC}  pg_tune_ai : Y  (${PG_TUNE_AI_SRC})"
+echo -e "${BOLD}║${NC}  pg_tune    : Y  (규칙 기반 튜닝, hypopg + pg_hint_plan 검증)"
 fi
 echo -e "${BOLD}║${NC}  시험 빌드  : $([[ ${VERIFY} == true ]] && echo 'Y (--verify)' || echo 'N')"
 [[ -n "${LOCK_FILE}" ]] && echo -e "${BOLD}║${NC}  lock       : ${LOCK_FILE}"
@@ -894,16 +892,15 @@ if [[ -f "${MODULE_INSTALLER}/install.conf.sample" ]]; then
 fi
 
 # ============================================================
-#  8. pg_tune_ai 복사 (선택)
+#  8. pg_tune 복사
 # ============================================================
 if [[ "${DOWNLOAD_TUNE,,}" =~ ^(y|yes)$ ]]; then
-    step "8. pg_tune_ai 패키징"
+    step "8. pg_tune 패키징"
     div
-    TUNE_DEST="${WORK_DIR}/tools/pg_tune_ai"
-    mkdir -p "${TUNE_DEST}"
-    ( cd "${PG_TUNE_AI_SRC}" && tar --exclude=.git --exclude=__pycache__ \
-          --exclude=pgtune_log -cf - . ) | tar -xf - -C "${TUNE_DEST}"
-    info "pg_tune_ai 복사 완료 → ${TUNE_DEST}/"
+    TUNE_DEST="${WORK_DIR}/tools/pg_tune"
+    rm -rf "${TUNE_DEST}"; mkdir -p "${TUNE_DEST}"
+    ( cd "${PG_TUNE_SRC}" && tar --exclude=__pycache__ --exclude=pgtune_log -cf - . ) | tar -xf - -C "${TUNE_DEST}"
+    info "pg_tune 복사 완료 → ${TUNE_DEST}/"
     info "  pgmon Statement 화면 [t] 튜닝에서 자동으로 찾아 사용합니다."
 fi
 
@@ -978,9 +975,9 @@ fi
 if [[ -d "${WORK_DIR}/lib" ]]; then
     echo -e "${BOLD}║${NC}  ├── lib/  (설치 스크립트 모듈)"
 fi
-if [[ -d "${WORK_DIR}/tools/pg_tune_ai" ]]; then
+if [[ -d "${WORK_DIR}/tools/pg_tune" ]]; then
     echo -e "${BOLD}║${NC}  ├── tools/"
-    echo -e "${BOLD}║${NC}  │   └── pg_tune_ai/"
+    echo -e "${BOLD}║${NC}  │   └── pg_tune/"
 fi
 for _i in "${!_root_files[@]}"; do
     if (( _i == _has_root - 1 )); then

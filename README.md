@@ -70,7 +70,7 @@ postgresql/
 ├── monitoring/                 (pgmon 선택 시)
 │   ├── pgmon/
 │   └── MONITORING_README.txt
-└── tools/pg_tune_ai/           (pg_tune_ai 를 찾으면 선택 — 아래 참고)
+└── tools/pg_tune/              (규칙 기반 쿼리 튜너 — 항상 포함)
 ```
 
 ---
@@ -95,9 +95,8 @@ bash pg_download.sh --lock BUILD_LOCK.txt    # 이전과 같은 구성으로 다
 | 설치 모드 | `single` / `ha` — ha면 etcd 바이너리와 Patroni pip 패키지까지 받음 |
 | pgmon 포함 | Y면 `pg_mon/`을 `postgresql/monitoring/pgmon/`으로 복사 |
 | 의존 패키지 다운로드 | Y면 각 모듈 `manifest.json`의 `requires.rpm`을 의존성까지 포함해 `PKG/`에 받음 (CRB/PowerTools 자동 활성화) |
-| pg_tune_ai 포함 | 이 레포 옆(`../pg_tune_ai`) 또는 `PG_TUNE_AI_DIR` 에 [pg_tune_ai](https://github.com/naturalTuna/pg_tune_ai)가 있으면 물어봄. Y면 `tools/pg_tune_ai/`로 복사 |
 
-**진행 순서**: PG 소스 → 빌드 기능 판단 → rpm → extension → (시험 빌드) → HA 패키지 → pgmon / installer / pg_tune_ai 복사 → `BUILD_LOCK.txt`
+**진행 순서**: PG 소스 → 빌드 기능 판단 → rpm → extension → (시험 빌드) → HA 패키지 → pgmon / installer / pg_tune 복사 → `BUILD_LOCK.txt`
 
 ### 자동 관리 — PG 버전별 패키지 / extension 태그
 
@@ -208,7 +207,7 @@ bash postgresql_install.sh -c install.conf -y     # 완전 무인 — 없는 항
 ### 기본 적용되는 설정
 
 - `shared_preload_libraries = 'pg_stat_statements'`, `pg_stat_statements.max = 10000`, `track_io_timing = on`
-  (ha 모드는 `patroni.yml` 의 DCS 파라미터에 들어가서 첫 기동부터 적용) → 설치 직후 pgmon Statement 화면 / pg_tune_ai 바로 사용 가능
+  (ha 모드는 `patroni.yml` 의 DCS 파라미터에 들어가서 첫 기동부터 적용) → 설치 직후 pgmon Statement 화면 / pg_tune 바로 사용 가능
 - `lc_messages` 는 서버에 `en_US.utf8` 로케일이 있으면 그걸, 없으면 `C` (없는 로케일을 지정하면 PG 가 기동하지 않음)
 
 ### ha 모드
@@ -378,7 +377,7 @@ DB를 고르면 해당 DB의 수집 데몬(`collector/collect.sh`)이 백그라�
 |---|---|
 | 1) 대시보드 | 버전, HA 역할, 세션 수, Long SQL, Lock, WAL 크기, CPU / MEM / SWAP / Disk I/O, 최근 Alert |
 | 2) 세션 | `pg_stat_activity` 목록, 필터(active / idle / idle in tx / long / blocked), 정렬, `k`로 세션 종료 |
-| 3) Statement | `pg_stat_statements` 상위 쿼리 (mean / total / calls / rows / cache hit 정렬), `d` 상세(전체 SQL + 통계), `t` **pg_tune_ai 튜닝**, 통계 리셋 |
+| 3) Statement | `pg_stat_statements` 상위 쿼리 (mean / total / calls / rows / cache hit 정렬), `d` 상세(전체 SQL + 통계), `t` **pg_tune 튜닝**, 통계 리셋 |
 | 4) Vacuum | dead tuple 현황, XID wraparound 위험도, 수동 VACUUM |
 | 5) Object | 테이블 / 인덱스 크기와 사용률, 미사용 인덱스, pgstattuple 기반 bloat |
 | 6) Alert | 활성 Alert, 이력, 임계값(전역 / DB별) 수정, 수동 해소 |
@@ -440,11 +439,13 @@ pgmon 서버가 아니라 **대상 DB 서버** 기준으로 수집합니다. 대
 
 대시보드 `Host Resources` 제목 옆에 어떤 방식으로 가져왔는지 표시됩니다.
 
-### Statement 화면에서 튜닝 (pg_tune_ai 연동)
+### Statement 화면에서 튜닝 (pg_tune 연동)
 
 Statement 목록에서 `t` → 번호 선택 → `pgtune tune` 실행 결과를 바로 보여줍니다 (로그: `pgmon/conf/pgtune_log/`).
 
-- pg_tune_ai 위치: `PGTUNE_CMD` 환경변수 → PATH 의 `pgtune` → 패키지의 `tools/pg_tune_ai/` → pgmon 옆 `pg_tune_ai/` 순서로 찾음
+- pg_tune 위치: `PGTUNE_CMD` 환경변수 → 패키지의 `tools/pg_tune/` → pgmon 옆 `pg_tune/` → (구) `pg_tune_ai` → PATH 의 `pgtune` 순서로 찾음
+- AI 없이 규칙 진단 + hypopg 가상 인덱스 + pg_hint_plan 실행계획 대안 실험 + work_mem/jit 실험 + 테이블 통계 점검. 자세한 건 [pg_tune/README.md](pg_tune/README.md)
+- hypopg 가 대상 DB 에 없으면 `CREATE EXTENSION hypopg` 할지 물어봄. pg_hint_plan 실험은 superuser 계정일 때만
 - `pg_stat_statements` 는 상수를 `$1`, `$2` 로 바꿔 저장하므로, 파라미터가 있으면 실제 값을 넣은 SQL 을 입력받습니다.
 - 모니터링 계정은 업무 테이블 조회 권한이 없을 수 있어 실행 계정을 따로 물어봅니다.
 - 기본은 `EXPLAIN` 만(쿼리 실행 안 함). `EXPLAIN ANALYZE` 는 확인 후에만 실행합니다.
@@ -479,7 +480,8 @@ psql -U postgres -d postgres -f pgmon/sql/init.sql
 
 | extension | 용도 | 사용 방법 |
 |---|---|---|
-| `hypopg` (auto) | pg_tune_ai 인덱스 후보 가상 검증 | `CREATE EXTENSION hypopg;` |
+| `hypopg` (auto) | pg_tune 인덱스 후보 가상 검증 | `CREATE EXTENSION hypopg;` |
+| `pg_hint_plan` (auto) | pg_tune 실행계획 대안 실험 / 쿼리 힌트 | 세션 `LOAD 'pg_hint_plan';` (superuser), 앱에서 쓰려면 `shared_preload_libraries` 에 추가 |
 | `pgvector` (auto) | 벡터 타입 / 유사도 검색 (HNSW, IVFFlat) | `CREATE EXTENSION vector;` (이름이 `vector`) |
 
 - **설치(빌드)만 되고 DB 에는 아무 영향이 없습니다.** 쓰려면 해당 DB 에서 `CREATE EXTENSION` 해야 합니다.

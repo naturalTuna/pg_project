@@ -18,7 +18,7 @@
     5. 안전장치 / 노드 추가 / DR (HA)
     6. 백업 / WAL 아카이브 / 복구
     7. pgmon 모니터링
-    8. 쿼리 튜닝 - pg_tune_ai
+    8. 쿼리 튜닝 - pg_tune
     9. 장애 대응 플레이북
    10. 로그 위치 모음
    11. 정기 작업 / 변경 작업
@@ -321,7 +321,7 @@
 
 
 ================================================================================
- 8. 쿼리 튜닝 - pg_tune_ai
+ 8. 쿼리 튜닝 - pg_tune
 ================================================================================
 
   pgmon 에서 : 3) Statement -> t -> 번호 선택
@@ -330,11 +330,25 @@
     - 기본 EXPLAIN 만, EXPLAIN ANALYZE 는 확인 후 실행
     - 결과 로그: pgmon/conf/pgtune_log/
 
-  CLI 로
-    pgtune tune        --dsn "$DSN" --sql "SELECT ..."
-    pgtune verify      --dsn "$DSN" --sql "SELECT ..." --index "CREATE INDEX ON t (c)"
-    pgtune index-check --dsn "$DSN" --min-scans 50
-    인덱스 가상 검증은 대상 DB 에 CREATE EXTENSION hypopg; 필요
+  CLI 로 (postgresql/tools/pg_tune)
+    T=postgresql/tools/pg_tune/pgtune.py
+    python3 $T tune        --dsn "$DSN" --sql "SELECT ..."            추정 플랜
+    python3 $T tune        --dsn "$DSN" --sql "SELECT ..." --analyze  실측 (DML 은 ROLLBACK)
+    python3 $T verify      --dsn "$DSN" --sql "..." --index "CREATE INDEX ON t (c)"
+    python3 $T hint        --dsn "$DSN" --sql "..." --hint "HashJoin(o c)"
+    python3 $T stats       --dsn "$DSN" --sql "..."
+    python3 $T index-check --dsn "$DSN" --min-scans 50
+
+  tune 순서
+    진단(규칙 15종) -> 테이블 통계 -> 인덱스 후보(hypopg) ->
+    실행계획 대안(pg_hint_plan: Hash/Merge Join, 인덱스 강제, Rows 보정) ->
+    설정 실험(work_mem, jit, --analyze 일 때) -> 추천
+    추천 우선순위: 인덱스 > 쿼리 수정 > 통계 > 설정 > 힌트(최후 수단)
+
+  준비
+    hypopg       대상 DB 에 CREATE EXTENSION hypopg;
+    pg_hint_plan 설치만 돼 있으면 됨, superuser 계정으로 실행해야 실험함
+    둘 다 없으면 해당 단계만 "검증 불가" 로 나오고 나머지는 동작
 
 
 ================================================================================
@@ -421,7 +435,7 @@
   pgmon collector      pgmon/conf/collector_<닉네임>.log
   pgmon 알림           pgmon/conf/alerts.log
   pgmon watchdog       pgmon/conf/watchdog.log
-  pg_tune_ai           pgmon/conf/pgtune_log/
+  pg_tune              pgmon/conf/pgtune_log/
 
 
 ================================================================================

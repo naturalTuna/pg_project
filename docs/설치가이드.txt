@@ -25,7 +25,7 @@
 ================================================================================
 
   pg_download.sh           [인터넷 서버] PG 소스, 의존 rpm, extension, etcd,
-                           Patroni wheel, pgmon, pg_tune_ai 를 postgresql/ 로 패키징
+                           Patroni wheel, pgmon, pg_tune 을 postgresql/ 로 패키징
   postgresql_install.sh    [폐쇄망 서버] 소스 빌드 -> initdb -> 튜닝 -> 백업 크론
     lib/common.sh            출력, conf 생성, rpm 설치, PG/extension 빌드
     lib/input.sh             입력 / 응답 파일 / 확인 화면
@@ -34,7 +34,7 @@
     lib/ha_safety.sh         watchdog / failsafe_mode / synchronous_mode
     lib/single.sh, ha.sh     모드별 설치
   pgmon                    터미널 모니터링 (수집 데몬 + 알림)
-  pg_tune_ai               EXPLAIN 기반 튜닝 도우미 (pgmon Statement 화면 연동)
+  pg_tune                  규칙 기반 쿼리 튜너 (hypopg / pg_hint_plan 검증, pgmon 연동)
 
 
 ================================================================================
@@ -181,7 +181,7 @@
     설치 모드         single / ha  (ha 면 etcd, Patroni 패키지 추가)
     pgmon 포함        Y 권장
     의존 rpm 다운로드 Y  (CRB/PowerTools 자동 활성화, sudo 필요)
-    pg_tune_ai 포함   ../pg_tune_ai 가 있으면 물어봄
+    pg_tune           항상 포함 (tools/pg_tune)
 
   결과 확인
     postgresql/BUILD_LOCK.txt          받은 구성 기록
