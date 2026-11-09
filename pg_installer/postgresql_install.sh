@@ -26,7 +26,7 @@ set -e
 #    single.sh  single 모드 설치
 #    ha.sh      ha 모드 설치 (etcd + Patroni)
 INSTALL_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib"
-for _m in common input backup vip ha_safety single ha; do
+for _m in common input backup vip ha_safety patroni_common single ha; do
     [[ -f "${INSTALL_LIB}/${_m}.sh" ]] || { echo "lib/${_m}.sh 가 없습니다 (${INSTALL_LIB}). 패키지를 다시 확인하세요."; exit 1; }
 done
 
@@ -40,6 +40,8 @@ source "${INSTALL_LIB}/backup.sh"
 source "${INSTALL_LIB}/vip.sh"
 # shellcheck source=lib/ha_safety.sh
 source "${INSTALL_LIB}/ha_safety.sh"
+# shellcheck source=lib/patroni_common.sh
+source "${INSTALL_LIB}/patroni_common.sh"
 
 # shellcheck source=/dev/null
 case "${INSTALL_MODE}" in

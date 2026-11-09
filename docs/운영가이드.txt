@@ -15,7 +15,7 @@
     2. 기본 명령 (환경 / 기동 / 정지)
     3. Patroni 운영 (HA)
     4. VIP 운영 (HA)
-    5. 안전장치 운영 - watchdog / failsafe / sync (HA)
+    5. 안전장치 / 노드 추가 / DR (HA)
     6. 백업 / WAL 아카이브 / 복구
     7. pgmon 모니터링
     8. 쿼리 튜닝 - pg_tune_ai
@@ -158,7 +158,7 @@
 
 
 ================================================================================
- 5. 안전장치 운영 - watchdog / failsafe / sync (HA)
+ 5. 안전장치 / 노드 추가 / DR (HA)
 ================================================================================
 
  5-1. watchdog (펜싱)
@@ -188,6 +188,43 @@
     확인  patronictl list 의 Role 이 "Sync Standby"
     변경  patronictl -c $PYML edit-config   ->  synchronous_mode: true|false
     ※ synchronous_mode_strict 는 2노드에서 Standby 장애 시 쓰기가 멈추므로 비권장
+
+
+ 5-4. 노드 추가 / DR 구성 - add_node.sh (HA)
+    실행 : etcd 서버의 패키지 디렉토리에서  bash add_node.sh
+    준비 : 새 서버에 사전 구성만 (계정/sudo, 최상위 디렉토리, /etc/hosts,
+           방화벽, etcd 서버 -> 새 서버 SSH 키).  PG 를 미리 설치하지 말 것
+
+    A) 같은 클러스터에 Standby 추가  - 3노드 HA 구성용
+       기존 클러스터 멤버가 됨. failover 후보 여부 선택
+         예     : Primary 장애 시 승격 대상, VIP 스크립트도 배포
+         아니오 : tags.nofailover/nosync = true, 절대 Primary 안 됨
+    B) DR standby cluster  - 다른 사이트 DR 구성용
+       새 서버에 자기 etcd(1노드) + 별도 Patroni 클러스터(<클러스터>-dr)
+       메인 VIP 를 따라 복제 (Standby Leader). 자동 승격 없음
+       메인에 영구 복제 슬롯(<이름>_slot) 생성 -> DR 이 늦어도 WAL 유지
+
+    스크립트가 하는 일
+      기존 노드 patroni.yml 읽기 -> 엔진 복사(etcd 서버 경유) -> rpm
+      -> 기존 멤버 pg_hba 에 새 서버 허용 + reload -> patroni.yml/service
+      -> (A) VIP 스크립트 / vip_watch 감시 대상 추가  (B) DR etcd 설치
+      -> Patroni 설치/기동 -> 클론 완료(streaming)까지 대기
+
+    DR 전환 (메인 전체 장애, 사람이 판단 후)
+      ssh <DR 서버>
+      patronictl -c $PYML edit-config   -> standby_cluster 블록 삭제 후 저장
+      = DR 이 Primary 로 승격. 앱 접속 주소를 DR 로 변경
+      메인 복구 후에는 메인을 DR 을 따라가는 standby 로 재구성해야 함
+
+    DR 을 없앨 때
+      메인에서 patronictl -c $PYML edit-config -> slots.<이름>_slot 삭제
+      (슬롯이 남아 있으면 메인에 WAL 이 계속 쌓임)
+
+    주의
+      - A 에서 failsafe_mode 사용 시: etcd 장애 중 Primary 가 모든 멤버와
+        8008 로 통신돼야 Primary 유지 -> 새 노드와 8008 통신 필수
+      - postgresql.conf 메모리 설정은 기존 노드 값을 그대로 씀
+        (사양이 다르면 patronictl edit-config 로 조정)
 
 
 ================================================================================

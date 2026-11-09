@@ -18,6 +18,7 @@
 pg_project/
 ├── pg_download.sh              ← [인터넷 서버] 패키지 다운로드 + postgresql/ 패키징
 ├── pg_installer/
+│   ├── add_node.sh             ← HA 노드 추가 / DR standby cluster 구성
 │   ├── postgresql_install.sh   ← [폐쇄망 서버] 설치 스크립트 진입점 (single / ha)
 │   ├── lib/                    ← 설치 로직 모듈
 │   │   ├── common.sh           ←   출력 함수, conf 생성, rpm 설치, PG / extension 빌드
@@ -25,6 +26,7 @@ pg_project/
 │   │   ├── backup.sh           ←   백업 / WAL 정리 / 복구 스크립트 생성·배포
 │   │   ├── vip.sh              ←   HA VIP (Patroni callback + 보정 cron + etcd 서버 감시자)
 │   │   ├── ha_safety.sh        ←   HA 안전장치 (watchdog / failsafe_mode / synchronous_mode)
+│   │   ├── patroni_common.sh   ←   Patroni 원격 설치 (install / add_node 공용)
 │   │   ├── single.sh           ←   single 모드 설치
 │   │   └── ha.sh               ←   ha 모드 설치 (etcd + Patroni)
 │   ├── install.conf.sample     ← 무인 설치 응답 파일 샘플
@@ -251,6 +253,15 @@ bash postgresql_install.sh -c install.conf -y     # 완전 무인 — 없는 항
 
 watchdog 은 설치 시 각 DB 노드에 `softdog` 모듈(부팅 시 자동 로드) 과 `/dev/watchdog` 권한(udev 규칙) 을 sudo 로 설정합니다.
 이미 설치된 클러스터는 `patronictl edit-config` 로 `failsafe_mode` / `synchronous_mode` 를 바꿀 수 있습니다.
+
+**노드 추가 / DR 구성 — `add_node.sh`** (etcd 서버에서 실행)
+
+| 방식 | 용도 | 결과 |
+|---|---|---|
+| A) 같은 클러스터에 Standby 추가 | 3노드 HA | Primary / Standby1 / Standby2. failover 후보 여부 선택 (아니오 = `nofailover`) |
+| B) DR standby cluster | 다른 사이트 DR | 새 서버에 자기 etcd + 별도 클러스터. 메인 VIP 를 따라 복제, **자동 승격 없음** |
+
+새 서버에는 사전 구성만 하고 PG 는 설치하지 않습니다 (엔진은 기존 노드에서 복사). 자세한 내용은 `docs/운영가이드` 5-4.
 
 **VIP (선택, Primary 를 따라 이동)**
 
