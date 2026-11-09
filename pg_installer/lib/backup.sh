@@ -517,7 +517,7 @@ if pgrep -f "patroni .*\.yml" >/dev/null 2>&1; then
       3) Primary 노드에서: bash $0 ... (이 스크립트로 복구)
       4) 복구 확인 후 Primary: sudo systemctl start patroni → patronictl resume
       5) Standby: patronictl -c <patroni.yml> reinit <클러스터명> <standby이름>
-    자세한 내용: docs/HA_아키텍처_가이드.txt"
+    자세한 내용: docs/운영가이드 6-6"
 fi
 
 echo ""
