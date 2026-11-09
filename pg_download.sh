@@ -779,7 +779,7 @@ if [[ "${INSTALL_MODE}" == "ha" ]]; then
     # Patroni pip 패키지
     PATRONI_TMP="${INSTALLER_DIR}/patroni_pkgs"
     if [[ -d "${PATRONI_TMP}" ]] && ls "${PATRONI_TMP}"/patroni-*.whl &>/dev/null \
-       && ls "${PATRONI_TMP}"/psycopg* &>/dev/null; then
+       && ls "${PATRONI_TMP}"/psycopg* &>/dev/null && ls "${PATRONI_TMP}"/ydiff-*.whl &>/dev/null; then
         info "Patroni 패키지 이미 존재 (스킵)"
     else
         mkdir -p "${PATRONI_TMP}"
@@ -792,6 +792,18 @@ if [[ "${INSTALL_MODE}" == "ha" ]]; then
             || error "Patroni pip 패키지 다운로드 실패. 로그: ${PKG_LOG}"
         ls "${PATRONI_TMP}"/patroni-*.whl "${PATRONI_TMP}"/psycopg2_binary-*.whl &>/dev/null \
             || error "patroni / psycopg2-binary 휠이 받아지지 않았습니다. 로그: ${PKG_LOG}"
+        # 소스(tar.gz)로만 받아진 패키지(ydiff 등)는 폐쇄망에서 빌드가 안 되므로 여기서 휠로 만든다
+        #   (patronictl 은 ydiff 가 없으면 실행 자체가 안 됨)
+        for _sd in "${PATRONI_TMP}"/*.tar.gz; do
+            [[ -f "${_sd}" ]] || continue
+            if pip3 wheel --no-deps -w "${PATRONI_TMP}" "${_sd}" >> "${PKG_LOG}" 2>&1; then
+                rm -f "${_sd}"
+            else
+                warn "휠 변환 실패: $(basename "${_sd}") (로그: ${PKG_LOG})"
+            fi
+        done
+        ls "${PATRONI_TMP}"/ydiff-*.whl &>/dev/null \
+            || error "ydiff 휠이 없습니다 (patronictl 실행에 필요). 로그: ${PKG_LOG}"
         info "Patroni 패키지 다운로드 완료 → ${PATRONI_TMP}/"
         tar -czf "${INSTALLER_DIR}/patroni_pkgs.tar.gz" \
             -C "${INSTALLER_DIR}" patroni_pkgs

@@ -121,6 +121,8 @@ if [[ -d "${PATRONI_PKGS_DIR}" ]] && [[ -n "$(ls -A "${PATRONI_PKGS_DIR}" 2>/dev
     # Patroni 는 PostgreSQL 드라이버(psycopg2 / psycopg3)가 있어야 기동됨
     ls "${PATRONI_PKGS_DIR}"/psycopg* &>/dev/null \
         || echo -e "  ${YELLOW}⚠${NC}  patroni_pkgs 에 psycopg2-binary 휠이 없습니다 (인터넷 서버에서: pip3 download psycopg2-binary --dest installer/patroni_pkgs)"
+    ls "${PATRONI_PKGS_DIR}"/ydiff-*.whl &>/dev/null \
+        || echo -e "  ${YELLOW}⚠${NC}  patroni_pkgs 에 ydiff 휠이 없습니다 — patronictl 이 동작하지 않습니다 (인터넷 서버에서: pip3 wheel --no-deps -w installer/patroni_pkgs ydiff)"
 fi
 
 # pg_download.sh 가 의존 rpm을 ${SCRIPT_DIR}/PKG/ 디렉토리 형태로 풀어놓은 경우

@@ -46,7 +46,11 @@ sudo pip3 install --no-index --find-links="${TMP}/patroni_pkgs" \
     --no-deps "${_pkg}" 2>/dev/null || true
 done
 
-# 설치 검증
+# 설치 검증 (patronictl 은 ydiff 가 없으면 import 단계에서 죽음)
+if ! python3 -c "import ydiff" 2>/dev/null && ! python3 -c "import cdiff" 2>/dev/null; then
+    echo "[ERROR] ydiff 가 설치되지 않았습니다 (patronictl 실행 불가). patroni_pkgs 에 ydiff-*.whl 필요"
+    exit 1
+fi
 if ! command -v patroni &>/dev/null; then
 echo "[ERROR] patroni 바이너리를 찾을 수 없습니다."
 pip3 show patroni 2>&1 || true
