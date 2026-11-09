@@ -340,7 +340,13 @@
  10. HA 동작 테스트 시나리오
 ================================================================================
 
-  준비 : 터미널 3개
+  자동 : etcd 서버(postgres 계정)에서  bash ha_test.sh
+         T0 사전 상태 / T1 쓰기·복제 / T2 백업 / T3 switchover / T4 Patroni 정지
+         / T5 VIP 보정 / T6 etcd 정지 를 순서대로 실행하고 ~/ha_test_report_<시각>.txt 생성
+         T7 watchdog(노드 재부팅) 은  bash ha_test.sh --only T7 --with-watchdog
+         전원 OFF 는 아래 T3 처럼 수동
+
+  수동 준비 : 터미널 3개
     (A) etcd 서버  : watch -n 2 "bash ~/pgvip/vip_watch.sh --once"
     (B) Primary    : tail -f /pgdata/log/vip.log
     (C) 앱/클라이언트 :

@@ -886,6 +886,7 @@ chmod +x "${INSTALL_DEST}"
 rm -rf "${WORK_DIR}/lib"
 cp -r "${MODULE_INSTALLER}/lib" "${WORK_DIR}/lib"
 [[ -f "${MODULE_INSTALLER}/add_node.sh" ]] && cp "${MODULE_INSTALLER}/add_node.sh" "${WORK_DIR}/add_node.sh"
+[[ -f "${MODULE_INSTALLER}/ha_test.sh" ]] && cp "${MODULE_INSTALLER}/ha_test.sh" "${WORK_DIR}/ha_test.sh"
 info "postgresql_install.sh + lib/ 복사 완료 → ${INSTALL_DEST}, ${WORK_DIR}/lib/"
 if [[ -f "${MODULE_INSTALLER}/install.conf.sample" ]]; then
     cp "${MODULE_INSTALLER}/install.conf.sample" "${WORK_DIR}/install.conf.sample"
