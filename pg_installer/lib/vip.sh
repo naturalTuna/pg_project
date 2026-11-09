@@ -22,6 +22,8 @@
 # 노드별 스크립트 본문 (설정 변수는 생성 시 앞에 붙는다)
 _vip_common_body() {
 cat <<'VIPCOMMON'
+# cron 은 PATH 가 /usr/bin:/bin 뿐이라 ip(/usr/sbin) 를 못 찾음 → VIP 확인/제거가 안 됐음 (실서버 확인)
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH}"
 LOG="${LOG_PATH}/vip.log"
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [${NODE_NAME}] $*" >> "${LOG}"; }
 
@@ -46,7 +48,7 @@ vip_add() {
             || log "arping 실패 (iputils 설치 / sudo 권한 확인) — 다른 서버 ARP 갱신이 늦을 수 있음"
         log "VIP 추가 ${VIP}/${VIP_PREFIX} dev ${dev} ($1)"
     else
-        log "VIP 추가 실패 (sudo -n ip 권한 확인)"
+        log "VIP 추가 실패 (위 줄의 ip 에러 확인 — sudo -n ip 권한 / 인터페이스)"
         return 1
     fi
 }
@@ -58,7 +60,7 @@ vip_del() {
     if sudo -n ip addr del "${VIP}/${VIP_PREFIX}" dev "${dev}" 2>>"${LOG}"; then
         log "VIP 제거 ${VIP} dev ${dev} ($1)"
     else
-        log "VIP 제거 실패 (sudo -n ip 권한 확인)"
+        log "VIP 제거 실패 (위 줄의 ip 에러 확인 — sudo -n ip 권한 / 인터페이스)"
         return 1
     fi
 }
@@ -229,6 +231,7 @@ fn_vip_verify() {
 #  etcd 서버가 죽어도 DB 노드 쪽 VIP 관리는 그대로 동작한다.
 _vip_watch_body() {
 cat <<'VIPWATCH'
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH}"
 LOG="${WATCH_HOME}/vip_watch.log"
 STATE_F="${WATCH_HOME}/.vip_watch_${CLUSTER_NAME}.state"   # "<마지막 알림 상태>|<직전 관측 상태>|<마지막 리더>"
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "${LOG}"; }

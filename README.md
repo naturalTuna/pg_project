@@ -396,6 +396,7 @@ bash pgmon_ctl.sh start [닉네임|all]
 bash pgmon_ctl.sh stop  [닉네임|all]  # watchdog 재기동 대상에서도 빠짐
 bash pgmon_ctl.sh restart [닉네임|all]
 bash pgmon_ctl.sh cron-install        # 사용자 crontab: 재부팅 시 자동 시작 + 5분마다 watchdog
+bash pgmon_check.sh                # 설치 / 수집 정상 여부 점검 리포트 (--alert-test 로 Alert 시험)
 bash pgmon_ctl.sh log <닉네임> [줄수]
 ```
 

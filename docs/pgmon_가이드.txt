@@ -651,6 +651,27 @@ collector 는 pgmon 화면을 종료해도 계속 수집한다 (일반 계정 �
   변경 후: bash pgmon_ctl.sh restart
 
 
+----------------------------------------------------------------
+5-12. 설치 / 수집 정상 여부 점검 — pgmon_check.sh
+----------------------------------------------------------------
+
+  등록을 마친 뒤 한 번 실행해서 PASS / FAIL 리포트를 받는다.
+
+    bash pgmon_check.sh                 # C1~C6
+    bash pgmon_check.sh --alert-test    # C7 Alert 발생 시험 포함 (1~2분 추가)
+    bash pgmon_check.sh --wait 40       # C5 대기 시간 (기본 70초)
+
+  C1  저장소 DB    접속 / pgmon 스키마 / 쓰기 권한
+  C2  대상 DB      접속 / Primary·Standby / pg_monitor / pg_stat_statements
+                   / OS 지표 경로 (pg_read_file 또는 SSH)
+  C3  collector    실행 / 상시(watchdog 대상) / crontab
+  C4  수집 최신성  메트릭별 마지막 수집 시각 vs 주기
+  C5  수집 증가    N초 동안 스냅샷이 실제로 늘었는지
+  C6  수집 값      CPU / MEM 값, HA 역할이 실제 DB 와 맞는지
+  C7  Alert        임시 임계값(lock_count WARN 0)으로 발생 확인 → 바로 원복
+  결과: conf/pgmon_check_<시각>.txt
+
+
 ================================================================
 6. 키 조작 요약
 ================================================================
@@ -659,7 +680,7 @@ collector 는 pgmon 화면을 종료해도 계속 수집한다 (일반 계정 �
   ──────────────────────────────────────────────
   q           현재 화면에서 한 단계 뒤로 (기능 메뉴 → DB 선택)
   ESC         DB 선택 화면으로 바로 이동
-  Ctrl+C      pgmon 완전 종료 (collector 자동 정리)
+  Ctrl+C      pgmon 화면 종료 (collector 는 계속 수집 — 끄려면 pgmon_ctl.sh stop)
   r           즉시 갱신 (대시보드)
   f           필터 순환 (세션)
   s           정렬 변경 (세션 / Statement / Object)

@@ -388,7 +388,7 @@ $(fn_patroni_dcs_safety_yaml)
         - replication
 
 postgresql:
-  listen: ${HA_PRIMARY_HOST}:${PG_PORT}
+  listen: 0.0.0.0:${PG_PORT}   # VIP 로 들어오는 접속도 받기 위해 전체 주소 (connect_address 는 노드 주소)
   connect_address: ${HA_PRIMARY_HOST}:${PG_PORT}
   data_dir: ${DATA_PATH}
   bin_dir: ${ENGINE_PATH}/bin
@@ -568,7 +568,7 @@ $(fn_patroni_dcs_safety_yaml)
         - replication
 
 postgresql:
-  listen: ${HA_STANDBY_HOST}:${PG_PORT}
+  listen: 0.0.0.0:${PG_PORT}   # VIP 로 들어오는 접속도 받기 위해 전체 주소 (connect_address 는 노드 주소)
   connect_address: ${HA_STANDBY_HOST}:${PG_PORT}
   data_dir: ${DATA_PATH}
   bin_dir: ${ENGINE_PATH}/bin
@@ -643,24 +643,26 @@ PUPDATE_SVC
     info "[Primary] Patroni 기동 중..."
     ssh ${SSH_OPTS} "${HA_PRIMARY_HOST}" \
         "sudo systemctl start patroni" >> "${HA_LOG}" 2>&1
-    info "[Primary] Patroni 기동 요청 완료. Leader 초기화 대기 중 (30초)..."
-    sleep 30
+    info "[Primary] Patroni 기동 요청 완료. initdb + Leader 획득 대기 (최대 3분)..."
 
-    # Leader 확인 (최대 60초 추가 대기)
+    # Leader 확인: Patroni REST /primary 가 200 이면 Leader 이고 PG 가 떠 있음
+    #   (systemctl active 는 프로세스만 떠도 active 라 initdb 전에 통과해 버림)
     _PRI_LEADER=false
-    for _i in $(seq 1 6); do
-        _ROLE=$(ssh ${SSH_OPTS} "${HA_PRIMARY_HOST}" \
-            "sudo systemctl is-active patroni 2>/dev/null" || true)
-        if [[ "${_ROLE}" == "active" ]]; then
+    for _i in $(seq 1 36); do
+        sleep 5
+        _CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 \
+            "http://${HA_PRIMARY_HOST}:8008/primary" 2>/dev/null || true)
+        if [[ "${_CODE}" == "200" ]]; then
             _PRI_LEADER=true
             break
         fi
-        info "[Primary] Patroni 아직 초기화 중... (${_i}/6, 10초 대기)"
-        sleep 10
+        _ACT=$(ssh ${SSH_OPTS} "${HA_PRIMARY_HOST}" "systemctl is-active patroni 2>/dev/null" || true)
+        [[ "${_ACT}" == "failed" ]] && break
+        (( _i % 6 == 0 )) && info "[Primary] 초기화 중... ($(( _i * 5 ))s, REST /primary=${_CODE:-응답없음}, service=${_ACT})"
     done
 
     if [[ "${_PRI_LEADER}" != true ]]; then
-        warn "[Primary] Patroni 가 active 상태가 아닙니다. 로그 확인:"
+        warn "[Primary] Patroni 가 Leader 가 되지 못했습니다. 로그 확인:"
         ssh ${SSH_OPTS} "${HA_PRIMARY_HOST}" \
             "sudo journalctl -u patroni --no-pager -n 20" || true
         error "Primary Patroni 기동 실패. 위 로그를 확인하세요."
@@ -717,24 +719,25 @@ SUPDATE_SVC
     info "  ※ Patroni 가 pg_basebackup 으로 Primary 데이터를 자동 클론합니다."
     ssh ${SSH_OPTS} "${HA_STANDBY_HOST}" \
         "sudo systemctl start patroni" >> "${HA_LOG}" 2>&1
-    info "[Standby] Patroni 기동 요청 완료. 클론 완료 대기 중 (60초)..."
-    sleep 60
+    info "[Standby] Patroni 기동 요청 완료. 클론 + 복제 시작 대기 (최대 10분, DB 크기에 따라)..."
 
-    # Standby 기동 확인 (최대 60초 추가 대기)
+    # Standby 확인: Patroni REST /replica 가 200 이면 클론 끝나고 Replica 로 동작 중
     _SBY_OK=false
-    for _i in $(seq 1 6); do
-        _ROLE=$(ssh ${SSH_OPTS} "${HA_STANDBY_HOST}" \
-            "sudo systemctl is-active patroni 2>/dev/null" || true)
-        if [[ "${_ROLE}" == "active" ]]; then
+    for _i in $(seq 1 120); do
+        sleep 5
+        _CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 \
+            "http://${HA_STANDBY_HOST}:8008/replica" 2>/dev/null || true)
+        if [[ "${_CODE}" == "200" ]]; then
             _SBY_OK=true
             break
         fi
-        info "[Standby] Patroni 클론 진행 중... (${_i}/6, 10초 대기)"
-        sleep 10
+        _ACT=$(ssh ${SSH_OPTS} "${HA_STANDBY_HOST}" "systemctl is-active patroni 2>/dev/null" || true)
+        [[ "${_ACT}" == "failed" ]] && break
+        (( _i % 6 == 0 )) && info "[Standby] 클론 진행 중... ($(( _i * 5 ))s, REST /replica=${_CODE:-응답없음}, service=${_ACT})"
     done
 
     if [[ "${_SBY_OK}" != true ]]; then
-        warn "[Standby] Patroni 가 active 상태가 아닙니다. 로그 확인:"
+        warn "[Standby] Replica 로 올라오지 못했습니다. 로그 확인:"
         ssh ${SSH_OPTS} "${HA_STANDBY_HOST}" \
             "sudo journalctl -u patroni --no-pager -n 20" || true
         warn "Standby Patroni 기동 실패. 클러스터 상태를 수동으로 확인하세요."

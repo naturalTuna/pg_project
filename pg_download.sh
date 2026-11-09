@@ -778,15 +778,41 @@ if [[ "${INSTALL_MODE}" == "ha" ]]; then
 
     # Patroni pip 패키지
     PATRONI_TMP="${INSTALLER_DIR}/patroni_pkgs"
-    if [[ -d "${PATRONI_TMP}" ]] && [[ -n "$(ls -A "${PATRONI_TMP}" 2>/dev/null)" ]]; then
+    if [[ -d "${PATRONI_TMP}" ]] && ls "${PATRONI_TMP}"/patroni-*.whl &>/dev/null \
+       && ls "${PATRONI_TMP}"/psycopg* &>/dev/null && ls "${PATRONI_TMP}"/ydiff-*.whl &>/dev/null; then
         info "Patroni 패키지 이미 존재 (스킵)"
     else
         mkdir -p "${PATRONI_TMP}"
         info "Patroni pip 패키지 다운로드 중..."
         sudo dnf install -y python3-pip >> "${PKG_LOG}" 2>&1 || true
+        # psycopg2-binary: Patroni 가 PostgreSQL 에 붙는 드라이버 (patroni[etcd3] 만으로는 안 받아짐)
         pip3 download \
-            patroni[etcd3] \
-            --dest "${PATRONI_TMP}" >> "${PKG_LOG}" 2>&1
+            "patroni[etcd3]" psycopg2-binary \
+            --dest "${PATRONI_TMP}" >> "${PKG_LOG}" 2>&1 \
+            || error "Patroni pip 패키지 다운로드 실패. 로그: ${PKG_LOG}"
+        ls "${PATRONI_TMP}"/patroni-*.whl "${PATRONI_TMP}"/psycopg2_binary-*.whl &>/dev/null \
+            || error "patroni / psycopg2-binary 휠이 받아지지 않았습니다. 로그: ${PKG_LOG}"
+        # 소스(tar.gz)로만 받아진 패키지(ydiff 등)는 폐쇄망에서 빌드가 안 되므로 여기서 휠로 만든다
+        #   (patronictl 은 ydiff 가 없으면 실행 자체가 안 됨)
+        #   setup.py 방식 패키지는 wheel 모듈이 있어야 휠을 만들 수 있다 (없으면 빌드 실패)
+        pip3 install --user -q wheel setuptools >> "${PKG_LOG}" 2>&1 || true
+        for _sd in "${PATRONI_TMP}"/*.tar.gz; do
+            [[ -f "${_sd}" ]] || continue
+            if pip3 wheel --no-deps -w "${PATRONI_TMP}" "${_sd}" >> "${PKG_LOG}" 2>&1; then
+                rm -f "${_sd}"
+            else
+                warn "휠 변환 실패: $(basename "${_sd}") (로그: ${PKG_LOG})"
+            fi
+        done
+        # 그래도 ydiff 휠이 없으면 PyPI 의 최신 ydiff 휠을 받는다
+        #   (Patroni 가 요구하는 범위(<1.5) 밖일 수 있지만 patronictl 은 정상 동작함 — 실서버 확인)
+        if ! ls "${PATRONI_TMP}"/ydiff-*.whl &>/dev/null; then
+            pip3 download --no-deps --only-binary=:all: ydiff --dest "${PATRONI_TMP}" >> "${PKG_LOG}" 2>&1 \
+                && rm -f "${PATRONI_TMP}"/ydiff-*.tar.gz \
+                && warn "ydiff 소스 빌드 실패 → 최신 ydiff 휠로 대체 (patronictl 동작에는 문제 없음)"
+        fi
+        ls "${PATRONI_TMP}"/ydiff-*.whl &>/dev/null \
+            || error "ydiff 휠이 없습니다 (patronictl 실행에 필요). 로그: ${PKG_LOG}"
         info "Patroni 패키지 다운로드 완료 → ${PATRONI_TMP}/"
         tar -czf "${INSTALLER_DIR}/patroni_pkgs.tar.gz" \
             -C "${INSTALLER_DIR}" patroni_pkgs
@@ -860,6 +886,7 @@ chmod +x "${INSTALL_DEST}"
 rm -rf "${WORK_DIR}/lib"
 cp -r "${MODULE_INSTALLER}/lib" "${WORK_DIR}/lib"
 [[ -f "${MODULE_INSTALLER}/add_node.sh" ]] && cp "${MODULE_INSTALLER}/add_node.sh" "${WORK_DIR}/add_node.sh"
+[[ -f "${MODULE_INSTALLER}/ha_test.sh" ]] && cp "${MODULE_INSTALLER}/ha_test.sh" "${WORK_DIR}/ha_test.sh"
 info "postgresql_install.sh + lib/ 복사 완료 → ${INSTALL_DEST}, ${WORK_DIR}/lib/"
 if [[ -f "${MODULE_INSTALLER}/install.conf.sample" ]]; then
     cp "${MODULE_INSTALLER}/install.conf.sample" "${WORK_DIR}/install.conf.sample"

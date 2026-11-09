@@ -150,10 +150,10 @@ collect_session() {
     local rows
     rows=$(_tpsql "
 SELECT
-    pid, usename, application_name, client_addr,
+    pid, usename, replace(application_name,'|','¦'), client_addr,
     state, wait_event_type, wait_event,
     extract(epoch from now()-query_start)::int,
-    left(regexp_replace(query,E'[ \\t\\n]+',' ','g'),500),
+    replace(left(regexp_replace(query,E'[ \\t\\n]+',' ','g'),500),'|','¦'),
     backend_type
 FROM pg_stat_activity
 WHERE backend_type='client backend'")
@@ -175,7 +175,7 @@ WHERE backend_type='client backend'")
 INSERT INTO pgmon.snap_session
     (db_id,pid,usename,appname,client_addr,state,
      wait_event_type,wait_event,duration_sec,query,backend_type)
-VALUES ${vals}"
+VALUES ${vals}" || log "snap_session INSERT 실패"
 }
 
 # ── Statement 수집 ────────────────────────────────────────────
@@ -277,10 +277,10 @@ collect_lock() {
 SELECT
     blocking.pid,
     blocking.usename,
-    left(blocking.query,200),
+    replace(left(regexp_replace(blocking.query,E'[ \\t\\n]+',' ','g'),200),'|','¦'),
     blocked.pid,
     blocked.usename,
-    left(blocked.query,200),
+    replace(left(regexp_replace(blocked.query,E'[ \\t\\n]+',' ','g'),200),'|','¦'),
     extract(epoch from now()-blocked.query_start)::int,
     blocked.wait_event
 FROM pg_stat_activity AS blocked
@@ -303,7 +303,7 @@ WHERE blocked.wait_event_type='Lock'")
 INSERT INTO pgmon.snap_lock
     (db_id,blocking_pid,blocking_user,blocking_query,
      blocked_pid,blocked_user,blocked_query,blocked_duration_sec,lock_type)
-VALUES ${vals}"
+VALUES ${vals}" || log "snap_lock INSERT 실패"
 }
 
 # ── SQL 문자열 이스케이프 ('' 처리) ──────────────────────────
