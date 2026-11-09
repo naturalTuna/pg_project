@@ -24,6 +24,9 @@
 #    bash ha_test.sh --with-watchdog    # T7 포함 (노드 재부팅)
 #    bash ha_test.sh --skip T2,T6
 #    bash ha_test.sh --keep             # 테스트 테이블(ha_test) 남김
+#    bash ha_test.sh --no-restore       # 끝나고 원래 Leader 로 되돌리지 않음
+#  ※ Patroni 는 자동으로 원래 노드로 되돌아가지 않음(failback 없음).
+#    이 스크립트는 끝날 때 시작 시점 Leader 로 switchover 해서 원상복구한다.
 #
 #  설정은 ~/pgvip/vip_watch.sh (설치 시 생성) 에서 노드 / VIP 를 읽고,
 #  없으면 아래 기본값 또는 환경변수로 지정:
@@ -39,13 +42,14 @@ PSQL="${ENGINE_PATH}/bin/psql"
 FAILOVER_TIMEOUT=120     # 전환 대기 최대(초)
 HEAL_TIMEOUT=300         # 정상 복귀 대기 최대(초)
 
-ONLY="" ; SKIP="" ; WITH_WD=false ; KEEP=false
+ONLY="" ; SKIP="" ; WITH_WD=false ; KEEP=false ; RESTORE=true
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --only) ONLY=",$2,"; shift ;;
         --skip) SKIP=",$2,"; shift ;;
         --with-watchdog) WITH_WD=true ;;
         --keep) KEEP=true ;;
+        --no-restore) RESTORE=false ;;
         -h|--help) sed -n '2,32p' "$0"; exit 0 ;;
         *) echo "알 수 없는 옵션: $1"; exit 1 ;;
     esac
@@ -376,6 +380,17 @@ elif want T7 && ! ${WITH_WD}; then
 fi
 
 # ── 마무리 ──────────────────────────────────────────────────
+# 시작 시점 Leader 로 되돌리기 (Patroni 는 자동 failback 을 하지 않음)
+if ${RESTORE} && [[ -n "${ORIG_LEADER}" && "${ORIG_LEADER}" != "MULTI" ]]; then
+    if wait_healthy "${HEAL_TIMEOUT}" >/dev/null && [[ "$(leader)" != "${ORIG_LEADER}" ]]; then
+        step "원상복구: Leader 를 시작 시점(${ORIG_LEADER}) 으로 switchover"
+        do_switchover "$(leader)" "${ORIG_LEADER}"
+        [[ "${NEW_L:-}" == "${ORIG_LEADER}" ]] && info "원상복구 완료 (${M_LEADER}s)" \
+            || result WARN "원상복구" "Leader 가 ${ORIG_LEADER} 로 돌아오지 않음 — 수동 switchover 필요"
+        wait_healthy "${HEAL_TIMEOUT}" >/dev/null || true
+    fi
+fi
+
 step "최종 상태"
 state_line
 L=$(leader)
