@@ -2,12 +2,14 @@
   pg_project  운영(관리) 가이드
 ================================================================================
   대상      : naturalTuna/pg_project 로 설치한 PostgreSQL (single / HA)
-  작성일    : 2026-11-08
-  같이 보기 : 설치가이드.txt (아키텍처, 설치, 테스트 시나리오)
+  작성일    : 2026-11-09
+  같이 보기 : 아키텍처_가이드.pdf (그림으로 보는 구성 / 장애 동작)
+              설치가이드.txt (설치, 테스트, 재설치)
+              pgmon_가이드.txt (모니터링 상세)
 
   경로는 기본값 기준.  다르면 바꿔서 읽을 것
     엔진 /postgres/app    데이터 /pgdata/data    로그 /pgdata/log
-    아카이브 /pgbackup/arc    백업 /pgbackup/back
+    아카이브 /pgbackup/arc    백업 /pgbackup/back    pgBackRest 저장소 /pgbackup/pgbackrest
     patroni.yml = /postgres/app/etc/patroni/patroni.yml  (아래에서 $PYML)
 
   목차
@@ -43,10 +45,13 @@
    [ ] pgmon Object: 미사용 인덱스, bloat
    [ ] /pgdata/log/wal_cleanup.log         정리 정상
    [ ] pitr_restore.sh --list              백업 개수 = 보관 개수
+       (pgbackrest) pgbackrest --stanza=<stanza> info   full 개수 = 보관 개수
+   [ ] bash pgmon_check.sh                 pgmon 수집 정상
 
   [분기]
    [ ] switchover 훈련 (3-3)
-   [ ] 복구 리허설: 별도 서버에서 pitr_restore.sh 로 복원 확인
+   [ ] 복구 리허설: 별도 서버에서 pitr_restore.sh / pgbr_restore.sh 로 복원 확인
+   [ ] bash ha_test.sh  (업무 영향 없는 시간)
    [ ] 패스워드 / pg_hba 점검
 
 
@@ -70,6 +75,19 @@
     sudo systemctl stop patroni       그 노드 PG 도 정지 (Primary 면 failover 발생)
     sudo systemctl start patroni
     sudo systemctl status etcd
+
+  [노드별 Patroni 정지 시 동작]
+    Primary 정지 : PG 도 같이 내려감 -> ttl(30초) 후 Standby 자동 승격
+                   다시 start 하면 Replica 로 복귀 (pg_rewind)
+    Standby 정지 : 복제만 끊김, Primary 는 계속. start 하면 자동 재합류
+    ※ pg_ctl 로 직접 PG 를 내리면 Patroni 가 다시 띄우거나 충돌. 항상 Patroni 로 제어
+
+ 2-1. sudo 권한 축소 (운영 전 선택)
+    설치 때는 NOPASSWD: ALL 이 필요하지만 운영 중에는 아래 정도면 된다
+      postgres ALL=(root) NOPASSWD: /usr/bin/systemctl start patroni, \
+          /usr/bin/systemctl stop patroni, /usr/bin/systemctl restart patroni, \
+          /usr/bin/systemctl status patroni, /usr/sbin/ip, /usr/sbin/arping
+    patronictl 은 sudo 불필요. 노드 추가 / 재설치 때는 다시 넓혀야 함
 
 
 ================================================================================
@@ -232,6 +250,8 @@
  6. 백업 / WAL 아카이브 / 복구
 ================================================================================
 
+  백업 방식은 설치 때 고른 것 (basebackup / pgbackrest). pgbackrest 는 6-7
+
   스크립트 : /postgres/app/etc/backup/
     basebackup/pg_basebackup.sh   베이스 백업 (크론, 기본 매일 02:00)
     basebackup/backup_setup.sh    경로 / 주기 / 보관 개수 / 크론 재설정, 끄기
@@ -343,6 +363,8 @@
     bash pgmon_ctl.sh restart [닉네임|all]
     bash pgmon_ctl.sh cron-install               재부팅 자동 시작 + 5분 watchdog
     bash pgmon_ctl.sh log <닉네임> [줄수]
+    bash pgmon_check.sh                          설치 / 수집 점검 리포트
+    bash pgmon_check.sh --alert-test             Alert 발생 / 해소까지 시험
 
  7-2. 알림 설정
     cp conf/notify.conf.sample conf/notify.conf
