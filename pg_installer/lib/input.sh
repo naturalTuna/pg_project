@@ -112,11 +112,15 @@ PATRONI_PKGS_DIR="${INSTALLER_DIR}/patroni_pkgs"
 PKG_TGZ="${INSTALLER_DIR}/PKG.tar.gz"
 PKG_DIR="${SCRIPT_DIR}/PKG"
 
-# pg_download.sh 가 patroni_pkgs/ 를 디렉토리 형태로 풀어놓은 경우 (압축을 안 한 경우)
-# patroni_pkgs.tar.gz 가 없으면 여기서 자동으로 압축해서 만들어 준다.
-if [[ ! -f "${PATRONI_PKGS}" ]] && [[ -d "${PATRONI_PKGS_DIR}" ]] && \
-   [[ -n "$(ls -A "${PATRONI_PKGS_DIR}" 2>/dev/null)" ]]; then
-    tar -czf "${PATRONI_PKGS}" -C "${INSTALLER_DIR}" "patroni_pkgs"
+# patroni_pkgs/ 디렉토리가 있으면, 묶음이 없거나 디렉토리가 더 새로울 때(휠 보충) 다시 압축한다.
+if [[ -d "${PATRONI_PKGS_DIR}" ]] && [[ -n "$(ls -A "${PATRONI_PKGS_DIR}" 2>/dev/null)" ]]; then
+    if [[ ! -f "${PATRONI_PKGS}" ]] || \
+       [[ -n "$(find "${PATRONI_PKGS_DIR}" -newer "${PATRONI_PKGS}" -print -quit 2>/dev/null)" ]]; then
+        tar -czf "${PATRONI_PKGS}" -C "${INSTALLER_DIR}" "patroni_pkgs"
+    fi
+    # Patroni 는 PostgreSQL 드라이버(psycopg2 / psycopg3)가 있어야 기동됨
+    ls "${PATRONI_PKGS_DIR}"/psycopg* &>/dev/null \
+        || echo -e "  ${YELLOW}⚠${NC}  patroni_pkgs 에 psycopg2-binary 휠이 없습니다 (인터넷 서버에서: pip3 download psycopg2-binary --dest installer/patroni_pkgs)"
 fi
 
 # pg_download.sh 가 의존 rpm을 ${SCRIPT_DIR}/PKG/ 디렉토리 형태로 풀어놓은 경우

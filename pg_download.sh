@@ -778,15 +778,20 @@ if [[ "${INSTALL_MODE}" == "ha" ]]; then
 
     # Patroni pip 패키지
     PATRONI_TMP="${INSTALLER_DIR}/patroni_pkgs"
-    if [[ -d "${PATRONI_TMP}" ]] && [[ -n "$(ls -A "${PATRONI_TMP}" 2>/dev/null)" ]]; then
+    if [[ -d "${PATRONI_TMP}" ]] && ls "${PATRONI_TMP}"/patroni-*.whl &>/dev/null \
+       && ls "${PATRONI_TMP}"/psycopg* &>/dev/null; then
         info "Patroni 패키지 이미 존재 (스킵)"
     else
         mkdir -p "${PATRONI_TMP}"
         info "Patroni pip 패키지 다운로드 중..."
         sudo dnf install -y python3-pip >> "${PKG_LOG}" 2>&1 || true
+        # psycopg2-binary: Patroni 가 PostgreSQL 에 붙는 드라이버 (patroni[etcd3] 만으로는 안 받아짐)
         pip3 download \
-            patroni[etcd3] \
-            --dest "${PATRONI_TMP}" >> "${PKG_LOG}" 2>&1
+            "patroni[etcd3]" psycopg2-binary \
+            --dest "${PATRONI_TMP}" >> "${PKG_LOG}" 2>&1 \
+            || error "Patroni pip 패키지 다운로드 실패. 로그: ${PKG_LOG}"
+        ls "${PATRONI_TMP}"/patroni-*.whl "${PATRONI_TMP}"/psycopg2_binary-*.whl &>/dev/null \
+            || error "patroni / psycopg2-binary 휠이 받아지지 않았습니다. 로그: ${PKG_LOG}"
         info "Patroni 패키지 다운로드 완료 → ${PATRONI_TMP}/"
         tar -czf "${INSTALLER_DIR}/patroni_pkgs.tar.gz" \
             -C "${INSTALLER_DIR}" patroni_pkgs
