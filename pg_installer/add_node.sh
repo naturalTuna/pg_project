@@ -237,7 +237,7 @@ if [[ -f "${PKG_TGZ}" ]]; then
     ssh ${SSH_OPTS} "${NEW_HOST}" bash >> "${HA_LOG}" 2>&1 <<'RPKG'
 TMP=$(mktemp -d)
 tar -zxf /tmp/PKG.tar.gz -C "${TMP}"
-sudo dnf localinstall -y "${TMP}"/PKG/*.rpm || true
+sudo dnf install -y --skip-broken "${TMP}"/PKG/*.rpm || sudo rpm -Uvh --force --nodeps "${TMP}"/PKG/*.rpm || true
 rm -rf "${TMP}" /tmp/PKG.tar.gz
 RPKG
     info "의존 패키지 설치 완료"
