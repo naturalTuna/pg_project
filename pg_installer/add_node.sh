@@ -321,8 +321,10 @@ src, dst, mode, new_name, new_host, failover, dr_scope, new_ip, dr_src, pg_port,
 t = open(src).read()
 t = re.sub(r'^name:.*$', 'name: ' + new_name, t, count=1, flags=re.M)
 # listen / connect_address 의 호스트만 새 노드로 (etcd hosts 줄은 건드리지 않음)
-t = re.sub(r'^(\s+(?:listen|connect_address):\s*)[^:\s]+(:\d+)[ \t]*$',
-           lambda m: m.group(1) + new_host + m.group(2), t, flags=re.M)
+#   0.0.0.0 / * 처럼 전체 주소로 listen 하는 경우는 그대로 둔다
+t = re.sub(r'^(\s+(?:listen|connect_address):\s*)([^:\s]+)(:\d+)([ \t]*(?:#.*)?)$',
+           lambda m: m.group(0) if m.group(2) in ('0.0.0.0', '*', '::')
+                     else m.group(1) + new_host + m.group(3) + m.group(4), t, flags=re.M)
 def tag(text, k, v):
     if re.search(r'^\s+' + k + r':', text, re.M):
         return re.sub(r'^(\s+' + k + r':).*$', lambda m: m.group(1) + ' ' + v, text, count=1, flags=re.M)
