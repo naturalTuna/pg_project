@@ -347,12 +347,14 @@ if [[ "${USE_BACKUP,,}" =~ ^(y|yes)$ ]]; then
         echo "  백업 실행 서버:"
         echo "    1) Primary  (${HA_PRIMARY_HOST})"
         echo "    2) Standby  (${HA_STANDBY_HOST})"
-        echo "    3) etcd     (${HA_ETCD_HOST}, 이 서버)"
+        # ※ etcd 서버 백업은 지원하지 않음: 설치 마지막에 etcd 서버의 엔진(pg_basebackup 포함)을
+        #   지우고, 백업 스크립트/크론도 DB 노드에만 배포되기 때문 (선택해도 백업이 안 걸렸음)
         read -rp "  선택 [2]: " BACKUP_HOST_SEL
         case "${BACKUP_HOST_SEL:-2}" in
             1) BACKUP_HOST="${HA_PRIMARY_HOST}" ; BACKUP_HOST_LABEL="primary" ;;
             2) BACKUP_HOST="${HA_STANDBY_HOST}" ; BACKUP_HOST_LABEL="standby" ;;
-            3) BACKUP_HOST="${HA_ETCD_HOST}"    ; BACKUP_HOST_LABEL="etcd"    ;;
+            3) echo -e "  ${YELLOW}⚠${NC}  etcd 서버 백업은 지원하지 않습니다 → Standby 로 설정"
+               BACKUP_HOST="${HA_STANDBY_HOST}" ; BACKUP_HOST_LABEL="standby" ;;
             *) BACKUP_HOST="${HA_STANDBY_HOST}" ; BACKUP_HOST_LABEL="standby" ;;
         esac
         echo "  백업 서버   : ${BACKUP_HOST_LABEL} (${BACKUP_HOST})"
