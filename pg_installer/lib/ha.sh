@@ -282,8 +282,13 @@ RMKDIR
         ssh ${SSH_OPTS} "${HA_PRIMARY_HOST}" bash >> "${HA_LOG}" 2>&1 <<RPKG
 TMP=\$(mktemp -d)
 tar -zxf /tmp/PKG.tar.gz -C "\${TMP}"
-sudo rpm -Uvh --force --nodeps "\${TMP}"/PKG/*.rpm 2>/dev/null || true
+# dnf 로 설치 가능한 것만 설치 (--skip-broken: -devel 등 버전이 안 맞는 일부 때문에 전체가 실패하지 않도록)
+sudo dnf install -y --skip-broken "\${TMP}"/PKG/*.rpm \
+    || sudo rpm -Uvh --force --nodeps "\${TMP}"/PKG/*.rpm \
+    || true
 rm -rf "\${TMP}" /tmp/PKG.tar.gz
+echo "[CHECK] pip3: \$(command -v pip3 || echo 없음)"
+echo "[CHECK] 없는 라이브러리: \$(ldd ${ENGINE_PATH}/bin/postgres 2>/dev/null | awk '/not found/{print \$1}' | tr '\\n' ' ')"
 RPKG
         info "[Primary] 의존 패키지 설치 완료"
     fi
@@ -459,8 +464,13 @@ SMKDIR
         ssh ${SSH_OPTS} "${HA_STANDBY_HOST}" bash >> "${HA_LOG}" 2>&1 <<SPKG
 TMP=\$(mktemp -d)
 tar -zxf /tmp/PKG.tar.gz -C "\${TMP}"
-sudo rpm -Uvh --force --nodeps "\${TMP}"/PKG/*.rpm 2>/dev/null || true
+# dnf 로 설치 가능한 것만 설치 (--skip-broken: -devel 등 버전이 안 맞는 일부 때문에 전체가 실패하지 않도록)
+sudo dnf install -y --skip-broken "\${TMP}"/PKG/*.rpm \
+    || sudo rpm -Uvh --force --nodeps "\${TMP}"/PKG/*.rpm \
+    || true
 rm -rf "\${TMP}" /tmp/PKG.tar.gz
+echo "[CHECK] pip3: \$(command -v pip3 || echo 없음)"
+echo "[CHECK] 없는 라이브러리: \$(ldd ${ENGINE_PATH}/bin/postgres 2>/dev/null | awk '/not found/{print \$1}' | tr '\\n' ' ')"
 SPKG
         info "[Standby] 의존 패키지 설치 완료"
     fi
