@@ -620,8 +620,13 @@ RPATRONI_CONF_SBY
         local _HOST="$1"
         local _LABEL="$2"
         scp ${SCP_OPTS} "${PATRONI_PKGS}" "${_HOST}:/tmp/patroni_pkgs.tar.gz" >> "${HA_LOG}" 2>&1
-        ssh ${SSH_OPTS} "${_HOST}" bash >> "${HA_LOG}" 2>&1 <<'PATRONI_INSTALL_EOF'
+        if ! ssh ${SSH_OPTS} "${_HOST}" bash >> "${HA_LOG}" 2>&1 <<'PATRONI_INSTALL_EOF'
 set -e
+# pip3 는 python3-pip rpm (PKG 에 포함) 으로 설치돼 있어야 함
+if ! command -v pip3 &>/dev/null; then
+    echo "[ERROR] pip3 가 없습니다 (python3-pip rpm 필요). PKG 에 python3-pip 가 있는지 확인"
+    exit 1
+fi
 TMP=$(mktemp -d)
 trap "rm -rf ${TMP} /tmp/patroni_pkgs.tar.gz" EXIT
 tar -zxf /tmp/patroni_pkgs.tar.gz -C "${TMP}"
@@ -661,9 +666,17 @@ if ! command -v patroni &>/dev/null; then
 fi
 echo "patroni 설치 경로: $(command -v patroni)"
 PATRONI_INSTALL_EOF
+        then
+            warn "[${_LABEL}] Patroni 설치 실패. ${HA_LOG} 마지막 부분:" >&2
+            tail -15 "${HA_LOG}" >&2
+            return 1
+        fi
         local _BIN
-        _BIN=$(ssh ${SSH_OPTS} "${_HOST}" \
-            "command -v patroni 2>/dev/null || echo /usr/local/bin/patroni")
+        _BIN=$(ssh ${SSH_OPTS} "${_HOST}" "command -v patroni 2>/dev/null")
+        if [[ -z "${_BIN}" ]]; then
+            warn "[${_LABEL}] 설치 후에도 patroni 실행 파일을 찾지 못했습니다" >&2
+            return 1
+        fi
         # $(...) 로 반환값을 캡처하므로 안내 메시지는 stderr 로 보낸다
         info "[${_LABEL}] Patroni 설치 완료 (bin: ${_BIN})" >&2
         echo "${_BIN}"
@@ -671,7 +684,8 @@ PATRONI_INSTALL_EOF
 
     # ── 5-1. Primary Patroni 설치 ────────────────────────────
     info "[Primary] Patroni 설치 중..."
-    PATRONI_BIN_PRI=$(fn_install_patroni_remote "${HA_PRIMARY_HOST}" "Primary")
+    PATRONI_BIN_PRI=$(fn_install_patroni_remote "${HA_PRIMARY_HOST}" "Primary") \
+        || error "[Primary] Patroni 설치 실패 — 위 로그 확인 (pip3 없음이면 PKG 에 python3-pip 추가)"
 
     # systemd ExecStart 경로를 실제 설치 경로로 업데이트
     ssh ${SSH_OPTS} "${HA_PRIMARY_HOST}" bash >> "${HA_LOG}" 2>&1 <<PUPDATE_SVC
@@ -744,7 +758,8 @@ PAPPLY_CONF
 
     # ── 5-3. Standby Patroni 설치 ────────────────────────────
     info "[Standby] Patroni 설치 중..."
-    PATRONI_BIN_SBY=$(fn_install_patroni_remote "${HA_STANDBY_HOST}" "Standby")
+    PATRONI_BIN_SBY=$(fn_install_patroni_remote "${HA_STANDBY_HOST}" "Standby") \
+        || error "[Standby] Patroni 설치 실패 — 위 로그 확인 (pip3 없음이면 PKG 에 python3-pip 추가)"
 
     # systemd ExecStart 경로를 실제 설치 경로로 업데이트
     ssh ${SSH_OPTS} "${HA_STANDBY_HOST}" bash >> "${HA_LOG}" 2>&1 <<SUPDATE_SVC
