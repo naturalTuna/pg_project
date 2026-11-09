@@ -323,21 +323,97 @@ echo "  Log 경로 : ${LOG_PATH}"
 read -rp "DB Locale 을 입력하세요 [ko_KR.utf8]: " PG_LOCALE
 PG_LOCALE="${PG_LOCALE:-ko_KR.utf8}"
 
+# ── 백업 방식 선택 ────────────────────────────────────────────
+#   basebackup : pg_basebackup + cp 아카이브 (기존 방식)
+#   pgbackrest : full / diff 백업, 압축, 보관 정책, PITR. HA 는 etcd 서버가 저장소
+BACKUP_TOOL="basebackup"
+PGBR_HOME="${ENGINE_PATH}/etc/backup/pgbackrest"
+PGBR_BIN="${PGBR_HOME}/bin/pgbackrest"
+PGBR_CONF="${PGBR_HOME}/conf/pgbackrest.conf"
+PGBR_STANZA="" ; PGBR_REPO="" ; PGBR_ARCHIVE="n" ; PGBR_BACKUP="n"
+PGBR_FULL_CRON="" ; PGBR_DIFF_CRON="" ; PGBR_KEEP_FULL=""
+_PGBR_SRC=$(ls "${INSTALLER_DIR}"/pgbackrest/pgbackrest-*.tar.gz 2>/dev/null | sort -V | tail -1)
+echo ""
+echo -e "  ${BOLD}┌─ 백업 방식 ────────────────────────────────────────┐${NC}"
+echo -e "  ${BOLD}│${NC}   basebackup  pg_basebackup + 아카이브 cp (기존 방식)"
+if [[ -n "${_PGBR_SRC}" ]]; then
+echo -e "  ${BOLD}│${NC}   pgbackrest  full/diff 백업, 압축, 보관 정책, PITR"
+[[ "${INSTALL_MODE}" == "ha" ]] && \
+echo -e "  ${BOLD}│${NC}               HA: 저장소는 etcd 서버 (${HA_ETCD_HOST}) — failover 와 무관"
+else
+echo -e "  ${BOLD}│${NC}   pgbackrest  ${YELLOW}[패키지 없음]${NC} pg_download.sh 로 다시 받으면 선택 가능"
+fi
+echo -e "  ${BOLD}└────────────────────────────────────────────────────┘${NC}"
+read -rp "백업 선택 (pgbackrest / basebackup) [basebackup]: " BACKUP_TOOL_SEL
+case "${BACKUP_TOOL_SEL,,}" in
+    2|pgbackrest|pgbr|p*)
+        if [[ -n "${_PGBR_SRC}" ]]; then BACKUP_TOOL="pgbackrest"
+        else warn "pgBackRest 소스가 없어 basebackup 으로 진행합니다 (installer/pgbackrest/)"; fi ;;
+esac
+echo "  백업 방식 : ${BACKUP_TOOL}"
+
+# pgBackRest 저장소 경로 (Archive / Backup 중 먼저 묻는 곳에서 한 번)
+fn_ask_pgbr_repo() {
+    [[ -n "${PGBR_REPO}" ]] && return 0
+    local _where="이 서버"
+    [[ "${INSTALL_MODE}" == "ha" ]] && _where="etcd 서버 ${HA_ETCD_HOST}"
+    read -rp "  pgBackRest 저장소 상위 경로 (${_where}) [/pgbackup]: " PGBR_BASE
+    PGBR_BASE="${PGBR_BASE:-/pgbackup}"
+    PGBR_REPO="${PGBR_BASE}/pgbackrest"
+    local _def_stanza="main"
+    [[ "${INSTALL_MODE}" == "ha" ]] && _def_stanza="${CLUSTER_NAME}"
+    read -rp "  stanza 이름 (저장소 안의 DB 클러스터 이름) [${_def_stanza}]: " PGBR_STANZA
+    PGBR_STANZA="${PGBR_STANZA:-${_def_stanza}}"
+    echo "  저장소     : ${_where}:${PGBR_REPO}  (stanza ${PGBR_STANZA})"
+}
+
 read -rp "Archive 영역을 사용하시겠습니까? [Y/n]: " USE_ARCHIVE
 USE_ARCHIVE="${USE_ARCHIVE:-Y}"
 ARC_PATH=""
 if [[ "${USE_ARCHIVE,,}" =~ ^(y|yes)$ ]]; then
-    read -rp "  Archive 상위 경로 [/pgbackup]: " ARC_BASE
-    ARC_BASE="${ARC_BASE:-/pgbackup}"
-    ARC_PATH="${ARC_BASE}/arc"
-    echo "  Archive 경로 : ${ARC_PATH}"
+    if [[ "${BACKUP_TOOL}" == "pgbackrest" ]]; then
+        PGBR_ARCHIVE="y"
+        echo "  WAL 은 archive-push 로 pgBackRest 저장소에 보관합니다."
+        fn_ask_pgbr_repo
+    else
+        read -rp "  Archive 상위 경로 [/pgbackup]: " ARC_BASE
+        ARC_BASE="${ARC_BASE:-/pgbackup}"
+        ARC_PATH="${ARC_BASE}/arc"
+        echo "  Archive 경로 : ${ARC_PATH}"
+    fi
 fi
 
 read -rp "Backup 영역을 사용하시겠습니까? [Y/n]: " USE_BACKUP
 USE_BACKUP="${USE_BACKUP:-Y}"
 BACK_PATH="" ; DUMP_PATH="" ; BACKUP_CRON="" ; BACKUP_KEEP="" ; REPL_USER=""
 BACKUP_HOST="" ; BACKUP_HOST_LABEL=""
-if [[ "${USE_BACKUP,,}" =~ ^(y|yes)$ ]]; then
+if [[ "${USE_BACKUP,,}" =~ ^(y|yes)$ && "${BACKUP_TOOL}" == "pgbackrest" ]]; then
+    PGBR_BACKUP="y"
+    fn_ask_pgbr_repo
+    DUMP_PATH="${PGBR_BASE}/dump"
+    if [[ "${PGBR_ARCHIVE}" != "y" ]]; then
+        echo -e "  ${YELLOW}⚠${NC}  pgBackRest 백업은 WAL 아카이브가 필요합니다 → Archive 를 켭니다."
+        PGBR_ARCHIVE="y"
+    fi
+    [[ "${INSTALL_MODE}" == "ha" ]] && \
+        echo "  백업 실행  : etcd 서버 크론 → Standby 에서 복사 (Standby 가 없으면 Primary)"
+    echo "  백업 주기:"
+    echo "    1) 매주 일요일 02시 full + 월~토 02시 diff (권장)"
+    echo "    2) 매일 02시 full"
+    echo "    3) 직접 입력"
+    read -rp "  선택 [1]: " PGBR_CRON_SEL
+    case "${PGBR_CRON_SEL:-1}" in
+        2) PGBR_FULL_CRON="0 2 * * *" ; PGBR_DIFF_CRON="" ;;
+        3) read -rp "  full 백업 cron 표현식: " PGBR_FULL_CRON
+           read -rp "  diff 백업 cron 표현식 (없으면 엔터): " PGBR_DIFF_CRON ;;
+        *) PGBR_FULL_CRON="0 2 * * 0" ; PGBR_DIFF_CRON="0 2 * * 1-6" ;;
+    esac
+    [[ -z "${PGBR_FULL_CRON}" ]] && PGBR_FULL_CRON="0 2 * * 0"
+    echo "  백업 주기  : full '${PGBR_FULL_CRON}'${PGBR_DIFF_CRON:+ / diff '${PGBR_DIFF_CRON}'}"
+    read -rp "  full 백업 보관 개수 (diff 는 해당 full 과 같이 정리) [2]: " PGBR_KEEP_FULL
+    PGBR_KEEP_FULL="${PGBR_KEEP_FULL:-2}"
+    [[ "${INSTALL_MODE}" == "ha" ]] && REPL_USER="${REPL_USER_HA}"
+elif [[ "${USE_BACKUP,,}" =~ ^(y|yes)$ ]]; then
     read -rp "  Backup 상위 경로 [/pgbackup]: " BACK_BASE
     BACK_BASE="${BACK_BASE:-/pgbackup}"
     BACK_PATH="${BACK_BASE}/back"
@@ -387,6 +463,14 @@ if [[ "${USE_BACKUP,,}" =~ ^(y|yes)$ ]]; then
     fi
 fi
 
+
+# pgbackrest 를 골랐는데 Archive / Backup 둘 다 안 쓰면 설정할 게 없음
+if [[ "${BACKUP_TOOL}" == "pgbackrest" && "${PGBR_ARCHIVE}" != "y" ]]; then
+    warn "Archive / Backup 을 모두 사용하지 않아 pgBackRest 설정을 건너뜁니다."
+    BACKUP_TOOL="basebackup"
+fi
+[[ -z "${PGBR_KEEP_FULL}" ]] && PGBR_KEEP_FULL=2
+
 # ── single 모드 기본 포트 설정 ────────────────────────────────
 [[ "${INSTALL_MODE}" == "single" && -z "${PG_PORT}" ]] && PG_PORT="5432"
 
@@ -421,6 +505,13 @@ echo -e "${BOLD}  ║${NC}  Data 경로  : ${DATA_PATH}"
 echo -e "${BOLD}  ║${NC}  Log 경로   : ${LOG_PATH}"
 [[ -n "${ARC_PATH}"  ]] && echo -e "${BOLD}  ║${NC}  Archive    : ${ARC_PATH}"
 [[ -n "${BACK_PATH}" ]] && echo -e "${BOLD}  ║${NC}  Backup     : ${BACK_PATH}"
+if [[ "${BACKUP_TOOL}" == "pgbackrest" ]]; then
+echo -e "${BOLD}  ║${NC}  백업 방식  : pgBackRest  (stanza ${PGBR_STANZA})"
+echo -e "${BOLD}  ║${NC}  저장소     : $([[ ${INSTALL_MODE} == ha ]] && echo "etcd ${HA_ETCD_HOST}:" )${PGBR_REPO}"
+echo -e "${BOLD}  ║${NC}  Archive    : $([[ ${PGBR_ARCHIVE} == y ]] && echo 'archive-push → 저장소' || echo '사용 안 함')"
+[[ "${PGBR_BACKUP}" == "y" ]] && \
+echo -e "${BOLD}  ║${NC}  백업 크론  : full '${PGBR_FULL_CRON}'${PGBR_DIFF_CRON:+ / diff '${PGBR_DIFF_CRON}'}  보관 full ${PGBR_KEEP_FULL}개"
+fi
 echo -e "${BOLD}  ╚══════════════════════════════════════════════╝${NC}"
 echo ""
 read -rp "위 설정으로 설치를 진행하시겠습니까? [Y/n]: " CONFIRM

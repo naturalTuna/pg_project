@@ -20,18 +20,21 @@ set -e
 #  설치 로직은 lib/ 에 기능별로 나뉘어 있다.
 #    common.sh  출력 함수, conf 생성, rpm 설치, PG / extension 빌드
 #    input.sh   실행 옵션(-c/-y), 입력값 수집, 설정 확인, 로그 초기화
-#    backup.sh  백업 / WAL 정리 / 복구 스크립트 배포
+#    backup.sh  백업 / WAL 정리 / 복구 스크립트 배포 (basebackup)
+#    pgbackrest.sh  pgBackRest 빌드 / 설정 / 크론 / 복구 스크립트
 #    vip.sh     HA VIP (Patroni callback + 보정 cron + etcd 서버 감시자)
 #    ha_safety.sh  HA 안전장치 (watchdog / failsafe_mode / synchronous_mode)
 #    single.sh  single 모드 설치
 #    ha.sh      ha 모드 설치 (etcd + Patroni)
 INSTALL_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib"
-for _m in common input backup vip ha_safety patroni_common single ha; do
+for _m in common pgbackrest input backup vip ha_safety patroni_common single ha; do
     [[ -f "${INSTALL_LIB}/${_m}.sh" ]] || { echo "lib/${_m}.sh 가 없습니다 (${INSTALL_LIB}). 패키지를 다시 확인하세요."; exit 1; }
 done
 
 # shellcheck source=lib/common.sh
 source "${INSTALL_LIB}/common.sh"
+# shellcheck source=lib/pgbackrest.sh
+source "${INSTALL_LIB}/pgbackrest.sh"
 # shellcheck source=lib/input.sh
 source "${INSTALL_LIB}/input.sh" "$@"
 # shellcheck source=lib/backup.sh
@@ -62,6 +65,8 @@ echo -e "${BOLD}║${NC}  Data 경로  : ${DATA_PATH}"
 echo -e "${BOLD}║${NC}  Log 경로   : ${LOG_PATH}"
 [[ -n "${ARC_PATH}"  ]] && echo -e "${BOLD}║${NC}  Archive    : ${ARC_PATH}"
 [[ -n "${BACK_PATH}" ]] && echo -e "${BOLD}║${NC}  Backup     : ${BACK_PATH}"
+[[ "${BACKUP_TOOL}" == "pgbackrest" ]] && \
+echo -e "${BOLD}║${NC}  pgBackRest : $([[ ${INSTALL_MODE} == ha ]] && echo "etcd ${HA_ETCD_HOST}:")${PGBR_REPO}  (stanza ${PGBR_STANZA})"
 if [[ "${INSTALL_MODE}" == "ha" ]]; then
 echo -e "${BOLD}╠══════════════════════════════════════════════╣${NC}"
 echo -e "${BOLD}║${NC}  etcd       : ${HA_ETCD_HOST}"

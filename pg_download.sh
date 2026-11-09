@@ -306,6 +306,7 @@ fi
 if [[ "${DOWNLOAD_TUNE,,}" =~ ^(y|yes)$ ]]; then
 echo -e "${BOLD}║${NC}  pg_tune    : Y  (규칙 기반 튜닝, hypopg + pg_hint_plan 검증)"
 fi
+echo -e "${BOLD}║${NC}  pgBackRest : Y  (설치 시 백업 방식 선택지 — 소스 + 빌드 rpm)"
 echo -e "${BOLD}║${NC}  시험 빌드  : $([[ ${VERIFY} == true ]] && echo 'Y (--verify)' || echo 'N')"
 [[ -n "${LOCK_FILE}" ]] && echo -e "${BOLD}║${NC}  lock       : ${LOCK_FILE}"
 echo -e "${BOLD}╚══════════════════════════════════════════════╝${NC}"
@@ -594,6 +595,50 @@ else
 fi
 
 # ============================================================
+#  4-B. pgBackRest 소스 (백업 방식 선택지) — 최신 release/x.y.z 태그
+#     installer/pgbackrest/pgbackrest-<버전>.tar.gz
+#     + meson / ninja pip 휠 (meson rpm 을 못 받는 환경 대비, 설치 서버에서 rpm 이 없을 때만 사용)
+# ============================================================
+PGBR_DIR="${INSTALLER_DIR}/pgbackrest"
+PGBR_REF=""
+step "4-B. pgBackRest 소스 다운로드"
+div
+mkdir -p "${PGBR_DIR}"
+if [[ -n "${LOCK_FILE}" && -n "${LOCK[PGBACKREST]:-}" ]]; then
+    PGBR_REF="${LOCK[PGBACKREST]}"
+else
+    PGBR_REF=$(fn_list_tags "pgbackrest/pgbackrest" | fn_pick_refs '^release/\d+\.\d+\.\d+$' "${PG_MAJOR}" | head -1)
+fi
+if [[ -z "${PGBR_REF}" ]]; then
+    warn "pgBackRest 태그 조회 실패 — 설치 시 백업 방식은 basebackup 만 선택 가능"
+else
+    PGBR_VER="${PGBR_REF#release/}"
+    PGBR_DEST="${PGBR_DIR}/pgbackrest-${PGBR_VER}.tar.gz"
+    if [[ -f "${PGBR_DEST}" ]]; then
+        info "pgBackRest ${PGBR_VER} 이미 존재 (스킵)"
+    else
+        _u="https://github.com/pgbackrest/pgbackrest/archive/refs/tags/${PGBR_REF}.tar.gz"
+        rm -f "${PGBR_DEST}.part"
+        if command -v wget &>/dev/null; then wget -q -O "${PGBR_DEST}.part" "${_u}"; else curl -fsSL -o "${PGBR_DEST}.part" "${_u}"; fi
+        if tar -tzf "${PGBR_DEST}.part" &>/dev/null; then
+            find "${PGBR_DIR}" -maxdepth 1 -name 'pgbackrest-*.tar.gz' -delete
+            mv "${PGBR_DEST}.part" "${PGBR_DEST}"
+            info "pgBackRest ${PGBR_VER} → ${PGBR_DEST}"
+        else
+            rm -f "${PGBR_DEST}.part"; PGBR_REF=""
+            warn "pgBackRest 다운로드 실패: ${_u}"
+        fi
+    fi
+    # meson / ninja 휠 (rpm 이 있으면 설치 서버에서 쓰지 않음)
+    if [[ -n "${PGBR_REF}" ]] && ! ls "${PGBR_DIR}"/wheels/meson-*.whl &>/dev/null; then
+        mkdir -p "${PGBR_DIR}/wheels"
+        pip3 download -q --only-binary=:all: meson ninja --dest "${PGBR_DIR}/wheels" >> "${PKG_LOG}" 2>&1 \
+            && info "meson / ninja 휠 → ${PGBR_DIR}/wheels (meson rpm 없을 때 대비)" \
+            || warn "meson / ninja 휠 다운로드 실패 (rpm 으로 설치되면 문제 없음)"
+    fi
+fi
+
+# ============================================================
 #  4-V. 시험 빌드 (--verify, 기본 off)
 #     이 서버(설치 서버와 같은 OS)에서 실제로 configure / make 해서
 #     "받은 구성으로 폐쇄망에서 빌드 가능한가" 를 미리 확인한다.
@@ -702,6 +747,25 @@ fn_verify() {
             warn "  ✘ ${_n} 후보 태그 전부 빌드 실패 → 패키지에서 제외"
         fi
     done
+
+    # pgBackRest 시험 빌드
+    local _pgbr_src
+    _pgbr_src=$(ls "${PGBR_DIR}"/pgbackrest-*.tar.gz 2>/dev/null | head -1)
+    if [[ -n "${_pgbr_src}" ]]; then
+        local _bd
+        _bd=$(mktemp -d)
+        tar -xzf "${_pgbr_src}" -C "${_bd}" --strip-components=1
+        if command -v meson &>/dev/null && ( cd "${_bd}" && \
+             PKG_CONFIG_PATH="${PREFIX}/lib/pkgconfig" meson setup build . -Dlibssh2=disabled && \
+             meson compile -C build ) >> "${VLOG}" 2>&1 && "${_bd}/build/src/pgbackrest" version >> "${VLOG}" 2>&1; then
+            echo "  ✔ pgBackRest $(basename "${_pgbr_src}" .tar.gz) 빌드 성공" >> "${REPORT}"
+            info "  ✔ pgBackRest 빌드 성공"
+        else
+            echo "  ✘ pgBackRest 빌드 실패 (meson / bzip2-devel / lz4-devel 확인) — VERIFY.log" >> "${REPORT}"
+            warn "  ✘ pgBackRest 빌드 실패 — 설치 시 basebackup 만 사용 가능"
+        fi
+        rm -rf "${_bd}"
+    fi
 
     # 런타임 라이브러리 점검
     local _libs _nf _paths _rt _pk _missing
@@ -917,6 +981,7 @@ LOCK_OUT="${WORK_DIR}/BUILD_LOCK.txt"
     for _n in $(printf '%s\n' "${!EXT_FINAL[@]}" | sort); do
         echo "EXT_${_n}=${EXT_FINAL[${_n}]}"
     done
+    [[ -n "${PGBR_REF}" ]] && echo "PGBACKREST=${PGBR_REF}"
     echo "VERIFY=${VERIFY_RESULT}"
     echo "# ── 받은 rpm (기록용 — --lock 재다운로드 시 rpm 은 저장소의 현재 버전을 받음) ──"
     for _f in "${WORK_DIR}"/PKG/*.rpm; do

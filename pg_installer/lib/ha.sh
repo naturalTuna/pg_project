@@ -11,6 +11,52 @@
     SSH_OPTS="-o StrictHostKeyChecking=no -p ${HA_SSH_PORT}"
     SCP_OPTS="-P ${HA_SSH_PORT} -o StrictHostKeyChecking=no"
 
+    # ── etcd 서버의 기존 single PostgreSQL 보호 ───────────────
+    #  pgmon 저장소 DB 를 etcd 서버에 single 로 설치해 둔 상태에서 HA 를 (재)설치하면
+    #  PHASE 2 빌드가 같은 엔진 경로를 덮어쓰고 PHASE 6 이 지워버린다.
+    #  → 빌드 전에 엔진을 옮겨두고(실행 중이면 중지), 끝나면(실패해도) 되돌리고 다시 기동.
+    HA_LOCAL_KEEP="" ; HA_LOCAL_DATA="" ; HA_LOCAL_RUNNING=false
+    fn_ha_local_pg_guard() {
+        [[ -x "${ENGINE_PATH}/bin/postgres" ]] || return 0
+        local _d=""
+        _d=$(ps -eo args 2>/dev/null | sed -n "s|^${ENGINE_PATH}/bin/postgres .*-D *\([^ ]*\).*|\1|p" | head -1)
+        if [[ -n "${_d}" ]]; then
+            HA_LOCAL_RUNNING=true
+        elif [[ -f "${HOME_DIR}/.postgresrc" ]]; then
+            _d=$(sed -n 's/^export PGDATA=//p' "${HOME_DIR}/.postgresrc" | tail -1)
+            [[ -f "${_d}/PG_VERSION" ]] || _d=""
+        fi
+        [[ -n "${_d}" ]] || return 0      # 데이터가 없는 엔진 = 이전 HA 빌드 잔여물 → 그냥 덮어씀
+        HA_LOCAL_DATA="${_d}"
+        HA_LOCAL_KEEP="${ENGINE_BASE}.ha_keep_$(date +%Y%m%d_%H%M%S)"
+        warn "이 서버에 single PostgreSQL 이 있습니다: 엔진 ${ENGINE_PATH} / DATA ${HA_LOCAL_DATA}"
+        warn "  HA 빌드 동안 ${HA_LOCAL_KEEP} 로 옮겨두고, 끝나면 되돌립니다 (데이터는 건드리지 않음)"
+        if ${HA_LOCAL_RUNNING}; then
+            "${ENGINE_PATH}/bin/pg_ctl" -D "${HA_LOCAL_DATA}" stop -m fast >> "${LOG_INSTALL}" 2>&1 \
+                || error "기존 PostgreSQL 중지 실패 (${HA_LOCAL_DATA})"
+            info "  기존 PostgreSQL 중지 (설치 후 다시 기동)"
+        fi
+        mv "${ENGINE_BASE}" "${HA_LOCAL_KEEP}" 2>/dev/null || sudo mv "${ENGINE_BASE}" "${HA_LOCAL_KEEP}" \
+            || error "엔진 경로 이동 실패: ${ENGINE_BASE}"
+        mkdir -p "${ENGINE_BASE}" 2>/dev/null \
+            || { sudo mkdir -p "${ENGINE_BASE}" && sudo chown "$(id -un):$(id -gn)" "${ENGINE_BASE}"; }
+        trap 'fn_ha_local_pg_restore' EXIT
+    }
+    fn_ha_local_pg_restore() {
+        [[ -n "${HA_LOCAL_KEEP}" && -d "${HA_LOCAL_KEEP}" ]] || return 0
+        info "etcd 서버: HA 빌드 결과물 삭제 후 기존 single PostgreSQL 엔진 복원"
+        rm -rf "${ENGINE_BASE}" 2>/dev/null || sudo rm -rf "${ENGINE_BASE}"
+        mv "${HA_LOCAL_KEEP}" "${ENGINE_BASE}" 2>/dev/null || sudo mv "${HA_LOCAL_KEEP}" "${ENGINE_BASE}" || { warn "복원 실패 — 수동: sudo mv ${HA_LOCAL_KEEP} ${ENGINE_BASE}"; return 0; }
+        HA_LOCAL_KEEP=""
+        trap - EXIT
+        if ${HA_LOCAL_RUNNING}; then
+            "${ENGINE_PATH}/bin/pg_ctl" -D "${HA_LOCAL_DATA}" -l "${LOG_PATH}/startup.log" start -w >> "${LOG_INSTALL}" 2>&1 \
+                && info "기존 PostgreSQL 다시 기동 (${HA_LOCAL_DATA})" \
+                || warn "기존 PostgreSQL 기동 실패 — 수동: ${ENGINE_PATH}/bin/pg_ctl -D ${HA_LOCAL_DATA} start"
+        fi
+        return 0
+    }
+
     phase "HA 모드 시작  |  etcd → 빌드 → Primary / Standby 배포"
     info "HA 구성 로그 → ${HA_LOG}"
 
@@ -247,10 +293,17 @@ RETCD
     # ──────────────────────────────────────────────────────────
     phase "PHASE 2  |  PostgreSQL 빌드  (etcd 서버 로컬)"
 
+    # etcd 서버에 single PostgreSQL (pgmon 저장소 등) 이 같은 엔진 경로에 있으면
+    # 빌드 동안 옮겨두고 PHASE 6 에서 되돌린다 (덮어쓰기 / 삭제 방지)
+    fn_ha_local_pg_guard
+
     fn_install_pkg_local
-    mkdir -p "${ENGINE_PATH}/etc"
+    mkdir -p "${ENGINE_PATH}/etc" 2>/dev/null \
+        || { sudo mkdir -p "${ENGINE_PATH}/etc" && sudo chown -R "$(id -un):$(id -gn)" "${ENGINE_BASE}"; }
     fn_build_pg_local "${LOCAL_CPU}"
     fn_build_extensions_local "${LOCAL_CPU}"
+    # pgBackRest 도 엔진 경로(etc/backup/pgbackrest)에 빌드 → 엔진과 같이 DB 노드로 복사됨
+    fn_build_pgbackrest_local "${LOCAL_CPU}"
 
     # ──────────────────────────────────────────────────────────
     #  PHASE 3. Primary DB 서버 구성 (원격)
@@ -360,6 +413,7 @@ $(fn_patroni_dcs_safety_yaml)
         wal_keep_size: 512MB
         shared_preload_libraries: pg_stat_statements
         track_io_timing: on
+$(fn_patroni_archive_params_yaml)
 
   initdb:
     - encoding: UTF8
@@ -393,6 +447,7 @@ postgresql:
   data_dir: ${DATA_PATH}
   bin_dir: ${ENGINE_PATH}/bin
   pgpass: ${HOME_DIR}/.pgpass
+$(fn_patroni_restore_yaml)
 $(fn_patroni_callbacks_yaml)
   authentication:
     replication:
@@ -540,6 +595,7 @@ $(fn_patroni_dcs_safety_yaml)
         wal_keep_size: 512MB
         shared_preload_libraries: pg_stat_statements
         track_io_timing: on
+$(fn_patroni_archive_params_yaml)
 
   initdb:
     - encoding: UTF8
@@ -573,6 +629,7 @@ postgresql:
   data_dir: ${DATA_PATH}
   bin_dir: ${ENGINE_PATH}/bin
   pgpass: ${HOME_DIR}/.pgpass
+$(fn_patroni_restore_yaml)
 $(fn_patroni_callbacks_yaml)
   authentication:
     replication:
@@ -783,9 +840,31 @@ SAPPLY_CONF
     #  PHASE 6. etcd 서버의 엔진 영역 정리
     # ──────────────────────────────────────────────────────────
     phase "PHASE 6  |  etcd 서버 빌드 결과물 정리"
-    info "etcd 서버에서 엔진 영역 삭제 중: ${ENGINE_BASE}"
-    sudo rm -rf "${ENGINE_BASE}" && info "etcd 서버 정리 완료 (엔진 영역 삭제됨)" \
-        || warn "엔진 영역 삭제 실패 (권한 부족). 수동으로 삭제하세요: sudo rm -rf ${ENGINE_BASE}"
+    # pgBackRest 를 쓰면 etcd 서버가 저장소(repo host) 라 실행 파일은 남긴다
+    _PGBR_SAVE=""
+    if fn_pgbr_on && [[ -x "${PGBR_BIN}" ]]; then
+        _PGBR_SAVE=$(mktemp -d)
+        cp -a "${PGBR_HOME}/bin" "${PGBR_HOME}/lib" "${_PGBR_SAVE}/"
+    fi
+    if [[ -n "${HA_LOCAL_KEEP}" ]]; then
+        fn_ha_local_pg_restore
+    else
+        info "etcd 서버에서 엔진 영역 삭제 중: ${ENGINE_BASE}"
+        sudo rm -rf "${ENGINE_BASE}" && info "etcd 서버 정리 완료 (엔진 영역 삭제됨)" \
+            || warn "엔진 영역 삭제 실패 (권한 부족). 수동으로 삭제하세요: sudo rm -rf ${ENGINE_BASE}"
+    fi
+    if [[ -n "${_PGBR_SAVE}" ]]; then
+        mkdir -p "${ENGINE_BASE}" 2>/dev/null \
+            || { sudo mkdir -p "${ENGINE_BASE}" && sudo chown "$(id -un):$(id -gn)" "${ENGINE_BASE}"; }
+        mkdir -p "${PGBR_HOME}"/{bin,lib,conf,log}
+        cp -a "${_PGBR_SAVE}/bin/." "${PGBR_HOME}/bin/"
+        cp -a "${_PGBR_SAVE}/lib/." "${PGBR_HOME}/lib/"
+        rm -rf "${_PGBR_SAVE}"
+        info "pgBackRest 저장소용 실행 파일 유지 → ${PGBR_HOME} (엔진 없이 동작)"
+    fi
+
+    # pgBackRest: 저장소(etcd 서버) / DB 노드 설정 → stanza-create → check → 첫 백업 → 크론
+    fn_pgbr_ha_setup
 
     echo ""
     echo -e "${BOLD}  ╔══════════════════════════════════════════════╗${NC}"
@@ -800,6 +879,8 @@ SAPPLY_CONF
     echo -e "${BOLD}  ║${NC}  VIP 감시  : ${HOME_DIR}/pgvip/vip_watch.sh (이 서버, 로그 vip_watch.log)"
     [[ -n "${BACKUP_HOST}" ]] && \
     echo -e "${BOLD}  ║${NC}  백업 서버 : ${BACKUP_HOST_LABEL} (${BACKUP_HOST})"
+    fn_pgbr_on && \
+    echo -e "${BOLD}  ║${NC}  백업      : pgBackRest 저장소 = etcd 서버 ${PGBR_REPO} (stanza ${PGBR_STANZA})"
     echo -e "${BOLD}  ╠══════════════════════════════════════════════╣${NC}"
     echo -e "${BOLD}  ║${NC}  클러스터 상태 확인 (Primary 서버에서):"
     echo -e "${BOLD}  ║${NC}    patronictl -c ${ENGINE_PATH}/etc/patroni/patroni.yml list"

@@ -16,6 +16,7 @@
     fn_create_dirs_local
     fn_build_pg_local "${CPU_CORES}"
     fn_build_extensions_local "${CPU_CORES}"
+    fn_build_pgbackrest_local "${CPU_CORES}"
 
     # 환경변수 설정
     POSTGRESRC="${HOME_DIR}/.postgresrc"
@@ -87,3 +88,6 @@ ALTER ROLE postgres SET search_path = postgres, public;
 ALTER DATABASE postgres SET search_path = postgres, public;
 PGSCHEMA
     info "pg_stat_statements 생성 + postgres 스키마/search_path 설정 완료 (재접속 시 적용)"
+
+    # ── pgBackRest (백업 방식 = pgbackrest 일 때) ──
+    fn_pgbr_single_setup

@@ -23,7 +23,8 @@ pg_project/
 │   ├── lib/                    ← 설치 로직 모듈
 │   │   ├── common.sh           ←   출력 함수, conf 생성, rpm 설치, PG / extension 빌드
 │   │   ├── input.sh            ←   실행 옵션(-c/-y), 입력값 수집, 설정 확인, 로그 초기화
-│   │   ├── backup.sh           ←   백업 / WAL 정리 / 복구 스크립트 생성·배포
+│   │   ├── backup.sh           ←   백업 / WAL 정리 / 복구 스크립트 생성·배포 (basebackup)
+│   │   ├── pgbackrest.sh       ←   pgBackRest 빌드 / 설정 / 크론 / 복구 스크립트
 │   │   ├── vip.sh              ←   HA VIP (Patroni callback + 보정 cron + etcd 서버 감시자)
 │   │   ├── ha_safety.sh        ←   HA 안전장치 (watchdog / failsafe_mode / synchronous_mode)
 │   │   ├── patroni_common.sh   ←   Patroni 원격 설치 (install / add_node 공용)
@@ -55,7 +56,7 @@ pg_project/
 ```
 postgresql/
 ├── postgresql_install.sh
-├── lib/                        ← 설치 스크립트 모듈 (common / input / backup / single / ha)
+├── lib/                        ← 설치 스크립트 모듈 (common / input / backup / pgbackrest / single / ha)
 ├── install.conf.sample         ← 무인 설치 응답 파일 샘플
 ├── BUILD_LOCK.txt              ← 이번 다운로드 구성 기록 (--lock 으로 재현)
 ├── VERIFY_REPORT.txt / VERIFY.log   (--verify 시)
@@ -65,6 +66,7 @@ postgresql/
 │   ├── postgresql-<버전>.tar.gz
 │   ├── build_features.txt      ← 이 PG 버전에서 쓸 configure 옵션 (자동 판단)
 │   ├── extensions/             ← source=git extension tarball + 카탈로그
+│   ├── pgbackrest/             ← pgBackRest 소스 tarball + meson/ninja 휠 (백업 선택지)
 │   ├── etcd-v<버전>-linux-amd64.tar.gz   (ha 선택 시)
 │   └── patroni_pkgs.tar.gz              (ha 선택 시)
 ├── monitoring/                 (pgmon 선택 시)
@@ -173,8 +175,9 @@ bash postgresql_install.sh -c install.conf -y     # 완전 무인 — 없는 항
 | 엔진 설치 경로 | `/postgres` | `/postgres/app` 에 설치 |
 | Data 영역 | `/pgdata` | `/pgdata/data`, 로그 `/pgdata/log` |
 | DB Locale | `ko_KR.utf8` | initdb `--locale` (나중에 바꾸려면 재구축) |
-| Archive 사용 | Y | `/pgbackup/arc`, `archive_command = 'cp %p ...'` |
-| Backup 사용 | Y | `/pgbackup/back`, pg_basebackup 스크립트 + 크론 등록 |
+| 백업 선택 | basebackup | `basebackup` (pg_basebackup + cp 아카이브) / `pgbackrest` (아래 **pgBackRest** 참고) |
+| Archive 사용 | Y | basebackup: `/pgbackup/arc`, `archive_command = 'cp %p ...'` / pgbackrest: `archive-push` → 저장소 |
+| Backup 사용 | Y | basebackup: `/pgbackup/back`, pg_basebackup 스크립트 + 크론 / pgbackrest: 저장소 `/pgbackup/pgbackrest`, full/diff 크론 |
 
 ### single 모드
 
@@ -343,6 +346,39 @@ bash pitr_restore.sh --backup 20261106_020000 --yes          # 특정 백업, �
 - 테이블스페이스를 쓰면 경고만 하고 수동 복원이 필요합니다.
 
 ha 모드에서는 백업 스크립트를 양쪽 노드에 깔고 백업 크론은 선택한 백업 서버에만, WAL 정리 크론은 양쪽 모두 등록합니다 (failover 후 새 Primary 에서도 정리되도록).
+ha 모드의 `archive_mode` / `archive_command` 는 patroni.yml DCS 파라미터에도 들어가서 **첫 기동부터** 아카이브됩니다.
+
+### pgBackRest (백업 선택 = pgbackrest)
+
+설치 질문 순서: `백업 선택 (pgbackrest / basebackup)` → `Archive 사용` → `Backup 사용` (저장소 경로, stanza, 주기, full 보관 개수)
+
+| | single | ha |
+|---|---|---|
+| 저장소 (repo) | 이 서버 `/pgbackup/pgbackrest` | **etcd 서버** `/pgbackup/pgbackrest` (공유 스토리지 불필요) |
+| WAL | `archive-push` → 로컬 저장소 | 각 DB 노드 `archive-push` → SSH → etcd 서버. failover 후에도 같은 저장소라 WAL 이 안 끊김 |
+| 백업 | 이 서버 크론 | etcd 서버 크론, Standby 에서 파일 복사 (`backup-standby=prefer`, Standby 없으면 Primary) |
+| stanza | `main` | 클러스터 이름 (`pg-cluster`) |
+
+- 설치 위치 (모든 서버 동일): `<엔진경로>/etc/backup/pgbackrest/` — `bin/pgbackrest`, `lib/libpq.so.5`, `conf/pgbackrest.conf`, `log/`, `pgbr_restore.sh`
+  - 소스(`installer/pgbackrest/pgbackrest-<버전>.tar.gz`)를 설치 서버에서 meson 으로 빌드. 실행 파일이 `../lib` 의 libpq 를 쓰므로 엔진을 지운 etcd 서버에서도 동작
+  - 기본 설정 파일 경로가 위 `conf/` 로 컴파일돼 있어 `--config` 없이 `pgbackrest --stanza=... info` 로 사용 (`.postgresrc` 에 PATH 추가)
+- 설치 중 자동: `stanza-create` → `check` → 첫 full 백업 → 크론 (기본: 일요일 02시 full + 월~토 02시 diff, full 2개 보관 — 오래된 백업/WAL 은 pgBackRest 가 자동 정리)
+- ha: DB 노드 → etcd 서버 SSH 키를 자동 등록 (archive-push 경로). Standby 의 `restore_command` 도 저장소의 `archive-get`
+- 한 서버에 여러 stanza 공존 가능 (etcd 서버의 HA 저장소 + pgmon 용 single). 설정 파일은 stanza 섹션 단위로만 갱신
+- `add_node.sh` (3-node) 는 새 노드를 저장소 설정(`pg3-host`)에 자동 추가
+
+```bash
+pgbackrest --stanza=pg-cluster info                       # 백업 목록 / WAL 범위 (etcd 서버 또는 DB 노드)
+pgbackrest --stanza=pg-cluster --type=full backup         # 수동 백업 (저장소 서버 = etcd 서버에서)
+bash <엔진경로>/etc/backup/pgbackrest/pgbr_restore.sh --target-time "2026-11-09 14:30:00"   # PITR (DB 서버)
+```
+- `pgbr_restore.sh`: PG 중지 → 현재 DATA 를 `<DATA>.before_restore_<시각>` 으로 보존(`--delta` 면 그 자리에서 덮어씀) → `pgbackrest restore` → 기동 → 복구 완료 대기. Patroni 가 떠 있으면 HA 절차를 안내하고 중단
+- 패키지: `pg_download.sh` 가 최신 `release/x.y.z` 태그 소스 + 빌드 rpm(meson, ninja-build, bzip2-devel, lz4-devel, libzstd-devel) + meson/ninja pip 휠(대비용)을 받음
+
+### etcd 서버에 single PostgreSQL 이 있을 때 (pgmon 저장소 DB)
+
+HA 를 (재)설치하면 etcd 서버의 같은 엔진 경로에 빌드하고 마지막에 지우기 때문에 기존 single 이 망가졌습니다.
+이제 PHASE 2 전에 기존 엔진을 `<엔진>.ha_keep_<시각>` 으로 옮기고(실행 중이면 중지), PHASE 6 에서 되돌리고 다시 기동합니다. 설치가 중간에 실패해도 되돌립니다. 데이터 디렉토리는 건드리지 않습니다.
 
 ---
 

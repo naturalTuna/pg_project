@@ -30,11 +30,17 @@
       "glibc-langpack-ko",
       "gettext",
       "glibc-langpack-en",
-      "python3-pip"
+      "python3-pip",
+      "meson",
+      "ninja-build",
+      "bzip2-devel",
+      "lz4-devel",
+      "libzstd-devel"
     ],
     "rpm_by_major": {
       "_comment": "PG 메이저 이상일 때 추가로 받는 rpm (키 = 최소 메이저). 기능(features)으로 표현하기 어려운 것만 사용"
-    }
+    },
+    "_rpm_comment": "meson / ninja-build / bzip2-devel / lz4-devel / libzstd-devel 은 pgBackRest 빌드용 (백업 방식 = pgbackrest 일 때)"
   },
   "configure_base": [
     "--with-openssl",
