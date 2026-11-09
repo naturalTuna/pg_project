@@ -148,8 +148,11 @@ pat, major = sys.argv[1], sys.argv[2]
 pat = pat.replace("{major}", major) if pat else ""
 stable = re.compile(r"^v?\d+(\.\d+)*$")
 tags = [t.strip() for t in sys.stdin if t.strip()]
-tags = [t for t in tags if stable.match(t) and (not pat or re.search(pat, t))]
-key = lambda t: tuple(int(x) for x in t.lstrip("v").split("."))
+if pat:   # 패턴이 있으면 패턴에 맞는 태그 (REL18_1_8_1 같은 비숫자 태그 포함)
+    tags = [t for t in tags if re.search(pat, t) and not t.endswith("^{}")]
+else:
+    tags = [t for t in tags if stable.match(t)]
+key = lambda t: tuple(int(x) for x in re.findall(r"\d+", t))
 for t in sorted(set(tags), key=key, reverse=True)[:4]:
     print(t)
 ' "$1" "$2"
@@ -283,16 +286,11 @@ else
     DOWNLOAD_MON="n"
 fi
 
-# ── pg_tune_ai 포함 여부 ────────────────────────────────────
-#   PG_TUNE_AI_DIR 환경변수 또는 이 레포 옆(../pg_tune_ai)에 있으면 함께 패키징
-PG_TUNE_AI_SRC="${PG_TUNE_AI_DIR:-${SCRIPT_DIR}/../pg_tune_ai}"
+# ── pg_tune (규칙 기반 쿼리 튜닝, 레포 내장) ───────────────
+#   항상 패키징 (python3 표준 라이브러리 + psql 만 사용, 추가 설치 없음)
+PG_TUNE_SRC="${SCRIPT_DIR}/pg_tune"
 DOWNLOAD_TUNE="n"
-if [[ -f "${PG_TUNE_AI_SRC}/pgtune.py" ]]; then
-    PG_TUNE_AI_SRC="$(cd "${PG_TUNE_AI_SRC}" && pwd)"
-    echo ""
-    read -rp "  pg_tune_ai 튜닝 도구도 함께 패키징 하시겠습니까? [Y/n]: " DOWNLOAD_TUNE
-    DOWNLOAD_TUNE="${DOWNLOAD_TUNE:-y}"
-fi
+[[ -f "${PG_TUNE_SRC}/pgtune.py" ]] && DOWNLOAD_TUNE="y"
 
 echo ""
 echo -e "${BOLD}╔══════════════════════════════════════════════╗${NC}"
@@ -306,8 +304,9 @@ else
 echo -e "${BOLD}║${NC}  pgmon      : N"
 fi
 if [[ "${DOWNLOAD_TUNE,,}" =~ ^(y|yes)$ ]]; then
-echo -e "${BOLD}║${NC}  pg_tune_ai : Y  (${PG_TUNE_AI_SRC})"
+echo -e "${BOLD}║${NC}  pg_tune    : Y  (규칙 기반 튜닝, hypopg + pg_hint_plan 검증)"
 fi
+echo -e "${BOLD}║${NC}  pgBackRest : Y  (설치 시 백업 방식 선택지 — 소스 + 빌드 rpm)"
 echo -e "${BOLD}║${NC}  시험 빌드  : $([[ ${VERIFY} == true ]] && echo 'Y (--verify)' || echo 'N')"
 [[ -n "${LOCK_FILE}" ]] && echo -e "${BOLD}║${NC}  lock       : ${LOCK_FILE}"
 echo -e "${BOLD}╚══════════════════════════════════════════════╝${NC}"
@@ -596,6 +595,50 @@ else
 fi
 
 # ============================================================
+#  4-B. pgBackRest 소스 (백업 방식 선택지) — 최신 release/x.y.z 태그
+#     installer/pgbackrest/pgbackrest-<버전>.tar.gz
+#     + meson / ninja pip 휠 (meson rpm 을 못 받는 환경 대비, 설치 서버에서 rpm 이 없을 때만 사용)
+# ============================================================
+PGBR_DIR="${INSTALLER_DIR}/pgbackrest"
+PGBR_REF=""
+step "4-B. pgBackRest 소스 다운로드"
+div
+mkdir -p "${PGBR_DIR}"
+if [[ -n "${LOCK_FILE}" && -n "${LOCK[PGBACKREST]:-}" ]]; then
+    PGBR_REF="${LOCK[PGBACKREST]}"
+else
+    PGBR_REF=$(fn_list_tags "pgbackrest/pgbackrest" | fn_pick_refs '^release/\d+\.\d+\.\d+$' "${PG_MAJOR}" | head -1)
+fi
+if [[ -z "${PGBR_REF}" ]]; then
+    warn "pgBackRest 태그 조회 실패 — 설치 시 백업 방식은 basebackup 만 선택 가능"
+else
+    PGBR_VER="${PGBR_REF#release/}"
+    PGBR_DEST="${PGBR_DIR}/pgbackrest-${PGBR_VER}.tar.gz"
+    if [[ -f "${PGBR_DEST}" ]]; then
+        info "pgBackRest ${PGBR_VER} 이미 존재 (스킵)"
+    else
+        _u="https://github.com/pgbackrest/pgbackrest/archive/refs/tags/${PGBR_REF}.tar.gz"
+        rm -f "${PGBR_DEST}.part"
+        if command -v wget &>/dev/null; then wget -q -O "${PGBR_DEST}.part" "${_u}"; else curl -fsSL -o "${PGBR_DEST}.part" "${_u}"; fi
+        if tar -tzf "${PGBR_DEST}.part" &>/dev/null; then
+            find "${PGBR_DIR}" -maxdepth 1 -name 'pgbackrest-*.tar.gz' -delete
+            mv "${PGBR_DEST}.part" "${PGBR_DEST}"
+            info "pgBackRest ${PGBR_VER} → ${PGBR_DEST}"
+        else
+            rm -f "${PGBR_DEST}.part"; PGBR_REF=""
+            warn "pgBackRest 다운로드 실패: ${_u}"
+        fi
+    fi
+    # meson / ninja 휠 (rpm 이 있으면 설치 서버에서 쓰지 않음)
+    if [[ -n "${PGBR_REF}" ]] && ! ls "${PGBR_DIR}"/wheels/meson-*.whl &>/dev/null; then
+        mkdir -p "${PGBR_DIR}/wheels"
+        pip3 download -q --only-binary=:all: meson ninja --dest "${PGBR_DIR}/wheels" >> "${PKG_LOG}" 2>&1 \
+            && info "meson / ninja 휠 → ${PGBR_DIR}/wheels (meson rpm 없을 때 대비)" \
+            || warn "meson / ninja 휠 다운로드 실패 (rpm 으로 설치되면 문제 없음)"
+    fi
+fi
+
+# ============================================================
 #  4-V. 시험 빌드 (--verify, 기본 off)
 #     이 서버(설치 서버와 같은 OS)에서 실제로 configure / make 해서
 #     "받은 구성으로 폐쇄망에서 빌드 가능한가" 를 미리 확인한다.
@@ -704,6 +747,25 @@ fn_verify() {
             warn "  ✘ ${_n} 후보 태그 전부 빌드 실패 → 패키지에서 제외"
         fi
     done
+
+    # pgBackRest 시험 빌드
+    local _pgbr_src
+    _pgbr_src=$(ls "${PGBR_DIR}"/pgbackrest-*.tar.gz 2>/dev/null | head -1)
+    if [[ -n "${_pgbr_src}" ]]; then
+        local _bd
+        _bd=$(mktemp -d)
+        tar -xzf "${_pgbr_src}" -C "${_bd}" --strip-components=1
+        if command -v meson &>/dev/null && ( cd "${_bd}" && \
+             PKG_CONFIG_PATH="${PREFIX}/lib/pkgconfig" meson setup build . -Dlibssh2=disabled && \
+             meson compile -C build ) >> "${VLOG}" 2>&1 && "${_bd}/build/src/pgbackrest" version >> "${VLOG}" 2>&1; then
+            echo "  ✔ pgBackRest $(basename "${_pgbr_src}" .tar.gz) 빌드 성공" >> "${REPORT}"
+            info "  ✔ pgBackRest 빌드 성공"
+        else
+            echo "  ✘ pgBackRest 빌드 실패 (meson / bzip2-devel / lz4-devel 확인) — VERIFY.log" >> "${REPORT}"
+            warn "  ✘ pgBackRest 빌드 실패 — 설치 시 basebackup 만 사용 가능"
+        fi
+        rm -rf "${_bd}"
+    fi
 
     # 런타임 라이브러리 점검
     local _libs _nf _paths _rt _pk _missing
@@ -894,16 +956,15 @@ if [[ -f "${MODULE_INSTALLER}/install.conf.sample" ]]; then
 fi
 
 # ============================================================
-#  8. pg_tune_ai 복사 (선택)
+#  8. pg_tune 복사
 # ============================================================
 if [[ "${DOWNLOAD_TUNE,,}" =~ ^(y|yes)$ ]]; then
-    step "8. pg_tune_ai 패키징"
+    step "8. pg_tune 패키징"
     div
-    TUNE_DEST="${WORK_DIR}/tools/pg_tune_ai"
-    mkdir -p "${TUNE_DEST}"
-    ( cd "${PG_TUNE_AI_SRC}" && tar --exclude=.git --exclude=__pycache__ \
-          --exclude=pgtune_log -cf - . ) | tar -xf - -C "${TUNE_DEST}"
-    info "pg_tune_ai 복사 완료 → ${TUNE_DEST}/"
+    TUNE_DEST="${WORK_DIR}/tools/pg_tune"
+    rm -rf "${TUNE_DEST}"; mkdir -p "${TUNE_DEST}"
+    ( cd "${PG_TUNE_SRC}" && tar --exclude=__pycache__ --exclude=pgtune_log -cf - . ) | tar -xf - -C "${TUNE_DEST}"
+    info "pg_tune 복사 완료 → ${TUNE_DEST}/"
     info "  pgmon Statement 화면 [t] 튜닝에서 자동으로 찾아 사용합니다."
 fi
 
@@ -920,6 +981,7 @@ LOCK_OUT="${WORK_DIR}/BUILD_LOCK.txt"
     for _n in $(printf '%s\n' "${!EXT_FINAL[@]}" | sort); do
         echo "EXT_${_n}=${EXT_FINAL[${_n}]}"
     done
+    [[ -n "${PGBR_REF}" ]] && echo "PGBACKREST=${PGBR_REF}"
     echo "VERIFY=${VERIFY_RESULT}"
     echo "# ── 받은 rpm (기록용 — --lock 재다운로드 시 rpm 은 저장소의 현재 버전을 받음) ──"
     for _f in "${WORK_DIR}"/PKG/*.rpm; do
@@ -978,9 +1040,9 @@ fi
 if [[ -d "${WORK_DIR}/lib" ]]; then
     echo -e "${BOLD}║${NC}  ├── lib/  (설치 스크립트 모듈)"
 fi
-if [[ -d "${WORK_DIR}/tools/pg_tune_ai" ]]; then
+if [[ -d "${WORK_DIR}/tools/pg_tune" ]]; then
     echo -e "${BOLD}║${NC}  ├── tools/"
-    echo -e "${BOLD}║${NC}  │   └── pg_tune_ai/"
+    echo -e "${BOLD}║${NC}  │   └── pg_tune/"
 fi
 for _i in "${!_root_files[@]}"; do
     if (( _i == _has_root - 1 )); then

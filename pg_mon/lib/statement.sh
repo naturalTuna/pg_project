@@ -182,18 +182,21 @@ LIMIT 1"
     } | less -R 2>/dev/null || true
 }
 
-# ── pg_tune_ai 실행 위치 탐색 ─────────────────────────────────
-#  1) PGTUNE_CMD 환경변수  2) PATH 의 pgtune
-#  3) 패키지 구조(postgresql/tools/pg_tune_ai)  4) pgmon 옆 pg_tune_ai/
+# ── pg_tune 실행 위치 탐색 ────────────────────────────────────
+#  1) PGTUNE_CMD 환경변수
+#  2) 패키지 구조 postgresql/tools/pg_tune  3) 레포 구조 pg_project/pg_tune
+#  4) (구) pg_tune_ai 위치  5) PATH 의 pgtune
 _pgtune_cmd() {
     if [[ -n "${PGTUNE_CMD:-}" ]]; then echo "$PGTUNE_CMD"; return; fi
-    if command -v pgtune &>/dev/null; then echo "pgtune"; return; fi
     local c
-    for c in "${PGMON_HOME}/../../tools/pg_tune_ai/pgtune.py" \
+    for c in "${PGMON_HOME}/../../tools/pg_tune/pgtune.py" \
+             "${PGMON_HOME}/../pg_tune/pgtune.py" \
+             "${PGMON_HOME}/../../tools/pg_tune_ai/pgtune.py" \
              "${PGMON_HOME}/../tools/pg_tune_ai/pgtune.py" \
              "${PGMON_HOME}/../pg_tune_ai/pgtune.py"; do
         if [[ -f "$c" ]]; then echo "python3 $(cd "$(dirname "$c")" && pwd)/pgtune.py"; return; fi
     done
+    if command -v pgtune &>/dev/null; then echo "pgtune"; return; fi
     echo ""
 }
 
@@ -203,9 +206,9 @@ _stmt_tune() {
     local cmd_pt
     cmd_pt=$(_pgtune_cmd)
     if [[ -z "$cmd_pt" ]]; then
-        printf "\n  ${C_BYELLOW}⚠ pg_tune_ai 를 찾을 수 없습니다.${C_RESET}\n"
-        printf "  ${C_DIM}  pip3 install 로 pgtune 명령을 설치하거나, PGTUNE_CMD=\"python3 /경로/pgtune.py\" 로 지정하세요.${C_RESET}\n"
-        printf "  ${C_DIM}  (pg_download.sh 로 패키징하면 postgresql/tools/pg_tune_ai 에 포함됩니다)${C_RESET}\n"
+        printf "\n  ${C_BYELLOW}⚠ pg_tune 을 찾을 수 없습니다.${C_RESET}\n"
+        printf "  ${C_DIM}  pg_download.sh 로 패키징하면 postgresql/tools/pg_tune 에 포함됩니다.${C_RESET}\n"
+        printf "  ${C_DIM}  또는 PGTUNE_CMD=\"python3 /경로/pg_tune/pgtune.py\" 로 지정하세요.${C_RESET}\n"
         read -r -n1 -p "  아무 키나 누르세요" _; return
     fi
 
@@ -240,16 +243,33 @@ _stmt_tune() {
         IFS= read -r -s t_pass; printf "\n"
     fi
 
-    local ans analyze_opt="--no-analyze"
-    printf "  ${C_BYELLOW}EXPLAIN ANALYZE 로 쿼리를 실제 실행할까요? (기본: 실행 안 함, 추정 플랜만) (y/N)${C_RESET}: "
-    read -r ans
-    [[ "${ans,,}" == "y" ]] && analyze_opt=""
-
     local dsn="host=${host} port=${port} dbname=${dbname} user=${t_user}"
+
+    # hypopg: 인덱스 후보 가상 검증용. 설치 가능한데 DB 에 없으면 만들지 물어봄
+    local hp
+    hp=$(PGPASSWORD="$t_pass" psql "$dsn" -XAtq -c "SELECT
+          (SELECT count(*) FROM pg_extension WHERE extname='hypopg')||'|'||
+          (SELECT count(*) FROM pg_available_extensions WHERE name='hypopg')" 2>/dev/null)
+    if [[ "$hp" == "0|1" ]]; then
+        printf "  ${C_BYELLOW}이 DB 에 hypopg 가 없습니다 (인덱스 후보 가상 검증용). CREATE EXTENSION hypopg 할까요? (Y/n)${C_RESET}: "
+        local hp_ans
+        read -r hp_ans
+        if [[ "${hp_ans,,}" != "n" ]]; then
+            PGPASSWORD="$t_pass" psql "$dsn" -XAtq -c "CREATE EXTENSION IF NOT EXISTS hypopg" >/dev/null 2>&1 \
+                && printf "  ${C_BGREEN}✔ hypopg 생성${C_RESET}\n" \
+                || printf "  ${C_BRED}hypopg 생성 실패 (권한 확인) — 인덱스 검증은 건너뜁니다${C_RESET}\n"
+        fi
+    fi
+
+    local ans analyze_opt="--no-analyze"
+    printf "  ${C_BYELLOW}실제로 실행해서 시간까지 비교할까요? (EXPLAIN ANALYZE, DML 은 ROLLBACK) (y/N)${C_RESET}: "
+    read -r ans
+    [[ "${ans,,}" == "y" ]] && analyze_opt="--analyze"
+
     local logdir="${PGMON_HOME}/conf"
     printf "\n  ${C_DIM}pgtune tune 실행 중... (로그: %s/pgtune_log/)${C_RESET}\n" "$logdir"
     # shellcheck disable=SC2086
     ( cd "$logdir" && PGPASSWORD="$t_pass" $cmd_pt tune --dsn "$dsn" --sql "$sql" $analyze_opt 2>&1
-      printf "\n[q] 닫기  (hypopg 미설치 시 인덱스 후보 검증 단계가 실패할 수 있습니다)\n"
+      printf "\n[q] 닫기   ※ 실행계획 대안(pg_hint_plan) 실험은 superuser 계정에서만 동작합니다\n"
     ) | less -R 2>/dev/null || true
 }

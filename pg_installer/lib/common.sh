@@ -78,7 +78,12 @@ max_wal_size                 = ${MAX_WAL}MB
 wal_keep_size                = ${KEEP_WAL}MB
 CONFEOF
 
-    if [[ -n "${ARC}" ]]; then
+    if [[ "${BACKUP_TOOL:-}" == "pgbackrest" && "${PGBR_ARCHIVE:-n}" == "y" ]]; then
+        cat >> "${OUT}" <<CONFEOF
+archive_mode    = on
+archive_command = '$(fn_pgbr_archive_cmd)'   # pgBackRest 저장소로
+CONFEOF
+    elif [[ -n "${ARC}" ]]; then
         cat >> "${OUT}" <<CONFEOF
 archive_mode    = on
 archive_command = 'test ! -f ${ARC}/%f && cp %p ${ARC}/%f'   # 이미 있는 파일은 덮어쓰지 않음
@@ -111,7 +116,7 @@ log_connections   = on
 log_disconnections= on
 log_lock_waits    = on
 
-# ── 쿼리 통계 (pgmon Statement / pg_tune_ai) ──────────────
+# ── 쿼리 통계 (pgmon Statement / pg_tune) ─────────────────
 shared_preload_libraries   = 'pg_stat_statements'
 pg_stat_statements.max     = 10000
 pg_stat_statements.track   = top
@@ -343,4 +348,12 @@ alias pgstat='\${PGHOME}/bin/pg_ctl -D ${DATA_PATH} status'
 alias pgreload='\${PGHOME}/bin/pg_ctl -D ${DATA_PATH} reload'
 alias psql='\${PGHOME}/bin/psql'
 RCEOF
+    if [[ "${BACKUP_TOOL:-}" == "pgbackrest" ]]; then
+        cat >> "${OUT}" <<RCEOF
+
+# ── pgBackRest ────────────────────────────────────────────
+export PATH=${PGBR_HOME}/bin:\${PATH}
+alias pgbrinfo='${PGBR_BIN} --stanza=${PGBR_STANZA} info'
+RCEOF
+    fi
 }

@@ -18,7 +18,7 @@
     5. 안전장치 / 노드 추가 / DR (HA)
     6. 백업 / WAL 아카이브 / 복구
     7. pgmon 모니터링
-    8. 쿼리 튜닝 - pg_tune_ai
+    8. 쿼리 튜닝 - pg_tune
     9. 장애 대응 플레이북
    10. 로그 위치 모음
    11. 정기 작업 / 변경 작업
@@ -32,6 +32,7 @@
    [ ] patronictl -c $PYML list            Leader 1, Replica streaming, Lag 작음   (HA)
    [ ] bash ~/pgvip/vip_watch.sh --once    OK                       (HA, etcd 서버)
    [ ] tail /pgdata/log/pg_basebackup.log  어젯밤 백업 성공
+       (pgbackrest) pgbackrest --stanza=<stanza> info   마지막 백업 시각 / status ok
    [ ] psql -c "select failed_count, last_failed_time from pg_stat_archiver;"
    [ ] df -h /pgdata /pgbackup             80% 미만
    [ ] pgmon 대시보드 / Alert 화면          활성 Alert 없음
@@ -279,6 +280,53 @@
        -> sudo systemctl start patroni -> patronictl -c $PYML resume
     5) patronictl -c $PYML reinit $CL <다른 노드>
 
+ 6-7. pgBackRest (백업 선택 = pgbackrest)
+    위치 (모든 서버)  /postgres/app/etc/backup/pgbackrest/
+                      bin/pgbackrest  conf/pgbackrest.conf  log/  pgbr_restore.sh
+    저장소            single: 이 서버 /pgbackup/pgbackrest
+                      HA    : etcd 서버 /pgbackup/pgbackrest
+    stanza            single: main / HA: 클러스터 이름 (pg-cluster)
+    크론              저장소 서버 (HA 는 etcd 서버)
+                      일요일 02시 full + 월~토 02시 diff, full 2개 보관
+                      오래된 백업 / WAL 은 백업 끝에 pgBackRest 가 자동 정리 (expire)
+
+    상태 / 목록       pgbackrest --stanza=pg-cluster info
+    점검              pgbackrest --stanza=pg-cluster check     (WAL 아카이브까지 확인)
+    수동 백업         pgbackrest --stanza=pg-cluster --type=full backup   (저장소 서버에서)
+                      --type=diff : 마지막 full 이후 변경분
+                      --type=incr : 마지막 백업 이후 변경분
+    로그              /postgres/app/etc/backup/pgbackrest/log/
+                        <stanza>-backup.log, <stanza>-archive-push.log (DB 노드),
+                        cron_<stanza>.log
+    아카이브 실패     psql -c "select * from pg_stat_archiver;"  failed_count 증가 시
+                      DB 노드 log/<stanza>-archive-push.log 확인
+                      HA: DB 노드 -> etcd 서버 SSH 확인
+                        ssh -o BatchMode=yes <etcd서버> true
+                      ※ etcd 서버가 내려가면 archive-push 가 실패하고 WAL 이
+                        pg_wal 에 쌓인다 (서비스는 계속). etcd 서버 복구 후 자동 해소.
+                        오래 걸리면 pg_wal 디스크 확인
+                      ※ Standby 가 내려가 있으면 check 는 실패하지만
+                        백업은 Primary 에서 진행 (backup-standby=prefer)
+
+    복구 - single     bash /postgres/app/etc/backup/pgbackrest/pgbr_restore.sh --list
+                      bash .../pgbr_restore.sh                                  최신까지
+                      bash .../pgbr_restore.sh --target-time "2026-11-09 14:30:00"
+                      bash .../pgbr_restore.sh --set 20261109-020001F            특정 백업
+                      bash .../pgbr_restore.sh ... --delta    DATA 보존 없이 덮어씀 (빠름)
+                      복구 후 새 타임라인 -> 바로 full 백업 1회
+    복구 - HA         1) patronictl -c $PYML pause
+                      2) 양쪽 노드: sudo systemctl stop patroni
+                      3) 기존 Primary 노드: bash .../pgbr_restore.sh [--target-time ...] --yes
+                         (저장소가 etcd 서버라 백업 복사 불필요. 끝나면 PG 를 다시 내려둠)
+                      4) 그 노드: sudo systemctl start patroni -> patronictl ... resume
+                      5) 다른 노드: sudo systemctl start patroni
+                         -> patronictl -c $PYML reinit $CL <다른 노드>
+                      6) etcd 서버: pgbackrest --stanza=$CL --type=full backup
+                      ※ HA 복구 절차는 실서버 미검증. 운영 전 리허설 필수
+
+    노드 추가         add_node.sh (A: 3-node) 가 새 노드를 저장소 설정에 pg3-host 로 추가
+                      DR (B) 는 별도 클러스터라 추가 안 함 (restore_command 로 메인 저장소 사용)
+
 
 ================================================================================
  7. pgmon 모니터링
@@ -321,7 +369,7 @@
 
 
 ================================================================================
- 8. 쿼리 튜닝 - pg_tune_ai
+ 8. 쿼리 튜닝 - pg_tune
 ================================================================================
 
   pgmon 에서 : 3) Statement -> t -> 번호 선택
@@ -330,11 +378,25 @@
     - 기본 EXPLAIN 만, EXPLAIN ANALYZE 는 확인 후 실행
     - 결과 로그: pgmon/conf/pgtune_log/
 
-  CLI 로
-    pgtune tune        --dsn "$DSN" --sql "SELECT ..."
-    pgtune verify      --dsn "$DSN" --sql "SELECT ..." --index "CREATE INDEX ON t (c)"
-    pgtune index-check --dsn "$DSN" --min-scans 50
-    인덱스 가상 검증은 대상 DB 에 CREATE EXTENSION hypopg; 필요
+  CLI 로 (postgresql/tools/pg_tune)
+    T=postgresql/tools/pg_tune/pgtune.py
+    python3 $T tune        --dsn "$DSN" --sql "SELECT ..."            추정 플랜
+    python3 $T tune        --dsn "$DSN" --sql "SELECT ..." --analyze  실측 (DML 은 ROLLBACK)
+    python3 $T verify      --dsn "$DSN" --sql "..." --index "CREATE INDEX ON t (c)"
+    python3 $T hint        --dsn "$DSN" --sql "..." --hint "HashJoin(o c)"
+    python3 $T stats       --dsn "$DSN" --sql "..."
+    python3 $T index-check --dsn "$DSN" --min-scans 50
+
+  tune 순서
+    진단(규칙 15종) -> 테이블 통계 -> 인덱스 후보(hypopg) ->
+    실행계획 대안(pg_hint_plan: Hash/Merge Join, 인덱스 강제, Rows 보정) ->
+    설정 실험(work_mem, jit, --analyze 일 때) -> 추천
+    추천 우선순위: 인덱스 > 쿼리 수정 > 통계 > 설정 > 힌트(최후 수단)
+
+  준비
+    hypopg       대상 DB 에 CREATE EXTENSION hypopg;
+    pg_hint_plan 설치만 돼 있으면 됨, superuser 계정으로 실행해야 실험함
+    둘 다 없으면 해당 단계만 "검증 불가" 로 나오고 나머지는 동작
 
 
 ================================================================================
@@ -417,11 +479,12 @@
   VIP (노드)           /pgdata/log/vip.log
   VIP 감시 (etcd 서버) ~/pgvip/vip_watch.log
   백업                 /pgdata/log/pg_basebackup.log
+  pgBackRest           /postgres/app/etc/backup/pgbackrest/log/  (HA 저장소: etcd 서버)
   WAL 정리             /pgdata/log/wal_cleanup.log
   pgmon collector      pgmon/conf/collector_<닉네임>.log
   pgmon 알림           pgmon/conf/alerts.log
   pgmon watchdog       pgmon/conf/watchdog.log
-  pg_tune_ai           pgmon/conf/pgtune_log/
+  pg_tune              pgmon/conf/pgtune_log/
 
 
 ================================================================================

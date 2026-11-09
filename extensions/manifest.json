@@ -12,7 +12,7 @@
       "source": "contrib",
       "used_by": [
         "pgmon",
-        "pg_tune_ai"
+        "pg_tune"
       ],
       "note": "PG contrib 내장"
     },
@@ -21,7 +21,7 @@
       "source": "contrib",
       "used_by": [
         "pgmon",
-        "pg_tune_ai"
+        "pg_tune"
       ],
       "note": "PG contrib 내장"
     },
@@ -64,15 +64,15 @@
       "note": "pg_stat_statements 의존. shared_preload_libraries 등록 필요."
     },
     "hypopg": {
-      "description": "가상(hypothetical) 인덱스 — pg_tune_ai verifier 가상 인덱스 검증",
+      "description": "가상(hypothetical) 인덱스 — pg_tune 인덱스 후보 검증",
       "source": "git",
       "repo": "HypoPG/hypopg",
       "git_ref": "auto",
       "build": "pgxs",
       "used_by": [
-        "pg_tune_ai"
+        "pg_tune"
       ],
-      "note": "pg_tune_ai verify/tune 필수. git_ref=auto (최신 정식 릴리스). --verify 로 해당 PG 버전 빌드 확인 가능."
+      "note": "pg_tune tune 의 인덱스 검증에 사용. 대상 DB 에서 CREATE EXTENSION hypopg; (pgmon 튜닝 화면에서 안내). git_ref=auto."
     },
     "pgvector": {
       "description": "벡터 타입 / 유사도 검색 (HNSW, IVFFlat 인덱스)",
@@ -122,6 +122,18 @@
       "build": "pgxs",
       "used_by": [],
       "note": "받으려면 source 를 git 으로. shared_preload_libraries 등록 필요."
+    },
+    "pg_hint_plan": {
+      "description": "실행계획 힌트 (/*+ HashJoin(a b) */ 등) — pg_tune 실행계획 대안 검증",
+      "source": "git",
+      "repo": "ossc-db/pg_hint_plan",
+      "git_ref": "auto",
+      "build": "pgxs",
+      "ref_pattern": "^REL{major}_\\d+_\\d+_\\d+$",
+      "used_by": [
+        "pg_tune"
+      ],
+      "note": "PG 메이저별 태그(REL18_1_8_x 등)를 자동 선택. pg_tune 은 세션에서 LOAD 'pg_hint_plan' 만 하므로 shared_preload 불필요 (superuser 계정 필요). 애플리케이션 쿼리에 힌트를 쓰려면 shared_preload_libraries 또는 session_preload_libraries 에 추가."
     }
   },
   "_make_args": "(선택) 항목별 \"make_args\": PGXS make 에 추가로 넘길 인자. 예) pgvector 의 OPTFLAGS= (CPU 전용 최적화 끄기)",

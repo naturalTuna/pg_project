@@ -48,8 +48,11 @@ ENGINE_BASE=/postgres      # → /postgres/app
 DATA_BASE=/pgdata          # → /pgdata/data, /pgdata/log
 PG_LOCALE=ko_KR.utf8
 
+# 백업 방식: basebackup(기존) / pgbackrest
+BACKUP_TOOL_SEL=basebackup
+
 USE_ARCHIVE=y
-ARC_BASE=/pgbackup         # → /pgbackup/arc
+ARC_BASE=/pgbackup         # → /pgbackup/arc        (basebackup)
 
 USE_BACKUP=y
 BACK_BASE=/pgbackup        # → /pgbackup/back, /pgbackup/dump
@@ -58,6 +61,15 @@ BACKUP_CRON_SEL=1          # 1=매일 02시  2=매주 일요일 02시  3=직접 
 #BACKUP_CRON="30 1 * * *"  # BACKUP_CRON_SEL=3 일 때
 BACKUP_KEEP=7
 REPL_USER=replicator       # (single) 백업용 복제 유저
+
+# ── pgbackrest 일 때 (BACKUP_TOOL_SEL=pgbackrest) ────────────
+#   single: 저장소 = 이 서버 / ha: 저장소 = etcd 서버
+#PGBR_BASE=/pgbackup       # → /pgbackup/pgbackrest
+#PGBR_STANZA=main          # ha 기본값 = 클러스터 이름
+#PGBR_CRON_SEL=1           # 1=일요일 full + 월~토 diff  2=매일 full  3=직접 입력
+#PGBR_FULL_CRON="0 2 * * 0" # PGBR_CRON_SEL=3 일 때
+#PGBR_DIFF_CRON="0 2 * * 1-6"
+#PGBR_KEEP_FULL=2          # full 백업 보관 개수
 
 # ── 최종 확인 ────────────────────────────────────────────────
 CONFIRM=y

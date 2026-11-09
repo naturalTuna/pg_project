@@ -25,7 +25,7 @@
 ================================================================================
 
   pg_download.sh           [인터넷 서버] PG 소스, 의존 rpm, extension, etcd,
-                           Patroni wheel, pgmon, pg_tune_ai 를 postgresql/ 로 패키징
+                           Patroni wheel, pgmon, pg_tune 을 postgresql/ 로 패키징
   postgresql_install.sh    [폐쇄망 서버] 소스 빌드 -> initdb -> 튜닝 -> 백업 크론
     lib/common.sh            출력, conf 생성, rpm 설치, PG/extension 빌드
     lib/input.sh             입력 / 응답 파일 / 확인 화면
@@ -34,7 +34,7 @@
     lib/ha_safety.sh         watchdog / failsafe_mode / synchronous_mode
     lib/single.sh, ha.sh     모드별 설치
   pgmon                    터미널 모니터링 (수집 데몬 + 알림)
-  pg_tune_ai               EXPLAIN 기반 튜닝 도우미 (pgmon Statement 화면 연동)
+  pg_tune                  규칙 기반 쿼리 튜너 (hypopg / pg_hint_plan 검증, pgmon 연동)
 
 
 ================================================================================
@@ -181,7 +181,7 @@
     설치 모드         single / ha  (ha 면 etcd, Patroni 패키지 추가)
     pgmon 포함        Y 권장
     의존 rpm 다운로드 Y  (CRB/PowerTools 자동 활성화, sudo 필요)
-    pg_tune_ai 포함   ../pg_tune_ai 가 있으면 물어봄
+    pg_tune           항상 포함 (tools/pg_tune)
 
   결과 확인
     postgresql/BUILD_LOCK.txt          받은 구성 기록
@@ -217,16 +217,27 @@
     엔진 설치 경로              (/postgres)      -> /postgres/app
     Data 영역 경로              (/pgdata)        -> /pgdata/data, /pgdata/log
     DB Locale                  (ko_KR.utf8)     -> 나중에 변경 불가 (재구축 필요)
+    백업 선택                  (basebackup)  pgbackrest / basebackup
+    [basebackup]
     Archive 사용               (Y)  상위 경로 (/pgbackup) -> /pgbackup/arc
     Backup 사용                (Y)  상위 경로 (/pgbackup) -> /pgbackup/back
       백업 주기                1) 매일 02:00  2) 매주 일 02:00  3) 직접(cron)
       백업 유지 개수           (7)
       복제 유저명              (replicator)
+    [pgbackrest]
+    Archive 사용               (Y)  WAL -> archive-push -> 저장소
+      저장소 상위 경로         (/pgbackup) -> /pgbackup/pgbackrest
+      stanza 이름              (main, HA 는 클러스터 이름)
+    Backup 사용                (Y)
+      백업 주기                1) 일요일 full + 월~토 diff (권장)  2) 매일 full  3) 직접
+      full 보관 개수           (2)
 
   진행
     rpm 설치 -> 소스 빌드 + contrib + extension(PGXS) -> ~/.postgresrc
     -> postgresql.conf 생성 -> initdb(--data-checksums) -> 기동
     -> 복제 유저 / 백업 스크립트 / 크론 -> pg_stat_statements 생성
+    pgbackrest 면 추가로: pgBackRest 빌드 -> stanza-create -> check
+                          -> 첫 full 백업 -> 크론
 
   완료 후
   $ source ~/.bashrc
@@ -255,7 +266,9 @@
     복제 유저명 / 패스워드
     Primary / Standby CPU, Memory
     엔진 / Data / Locale / Archive / Backup   (single 과 동일)
-    백업 서버                  Primary 또는 Standby (기본: Standby)
+    백업 서버                  Primary 또는 Standby (기본: Standby)   (basebackup)
+    pgbackrest 를 고르면       저장소 = etcd 서버 (이 서버), 백업은 etcd 서버
+                               크론이 Standby 에서 복사. 백업 서버 질문 없음
 
   확인 화면에서 etcd / VIP / 안전장치 값 확인 후 Y
 
@@ -272,6 +285,13 @@
                 patronictl list, 백업 / WAL 도구 배포
                 VIP 위치 확인, vip_watch 배포 + 1회 실행 결과 출력
     PHASE 6     etcd 서버 빌드 결과물 삭제
+                (pgbackrest 면 etc/backup/pgbackrest 만 남김 = 저장소용)
+                pgbackrest: DB 노드 -> etcd SSH 키 등록, 설정 배포,
+                stanza-create -> check -> 첫 full 백업 -> 크론 (etcd 서버)
+
+  ※ etcd 서버에 이미 single PostgreSQL (pgmon 저장소 DB) 이 같은 엔진 경로에
+    있으면, PHASE 2 전에 /postgres -> /postgres.ha_keep_<시각> 로 옮겨두고
+    (실행 중이면 중지) PHASE 6 에서 되돌린 뒤 다시 기동한다. 실패해도 되돌림.
 
   완료 화면에 etcd / Primary / Standby / VIP / 감시자 경로가 표시됨
 
@@ -313,6 +333,9 @@
    [ ] crontab -l                                      -> pg_basebackup, wal_cleanup
    [ ] bash /postgres/app/etc/backup/basebackup/pg_basebackup.sh   (1회 수동 백업)
    [ ] bash /postgres/app/etc/backup/pitr_restore.sh --list
+   (pgbackrest 면 위 백업 2줄 대신)
+   [ ] pgbackrest --stanza=main info        -> status ok, full backup 1개
+   [ ] crontab -l                           -> pgbackrest full / diff
 
   [HA]  (Primary 에서)
    [ ] patronictl -c /postgres/app/etc/patroni/patroni.yml list
@@ -327,6 +350,9 @@
                                                   (백업 서버는 pg_basebackup 도)
   (etcd 서버에서)
    [ ] bash ~/pgvip/vip_watch.sh --once        -> "OK 리더=[primary] VIP보유=[primary]"
+   [ ] pgbackrest --stanza=pg-cluster info     -> status ok, full backup 1개  (pgbackrest)
+   [ ] pgbackrest --stanza=pg-cluster check    -> Primary archive-push 정상    (pgbackrest)
+   [ ] crontab -l                              -> pgbackrest full / diff     (pgbackrest)
    [ ] crontab -l                              -> vip_watch
    [ ] 앱 서버에서 psql -h <VIP> -c "select pg_is_in_recovery();"  -> f
 

@@ -26,6 +26,8 @@ source "${INSTALL_LIB}/common.sh"
 source "${INSTALL_LIB}/ha_safety.sh"
 # shellcheck source=lib/patroni_common.sh
 source "${INSTALL_LIB}/patroni_common.sh"
+# shellcheck source=lib/pgbackrest.sh
+source "${INSTALL_LIB}/pgbackrest.sh"
 
 PATRONI_PKGS="${INSTALLER_DIR}/patroni_pkgs.tar.gz"
 PKG_DIR="${SCRIPT_DIR}/PKG"
@@ -482,6 +484,56 @@ for m in ms:
         _ok_state="${_st}"; break
     fi
 done
+
+# ============================================================
+#  8-B. pgBackRest — 새 노드를 저장소(이 etcd 서버) 설정에 추가 (모드 A)
+#   엔진 복사 때 DB 노드용 설정(repo1-host=etcd)도 같이 넘어갔으므로
+#   새 노드 → etcd SSH 키 등록 + 저장소 설정에 pgN-host 추가만 하면 된다
+# ============================================================
+PGBR_HOME="${ENGINE_PATH}/etc/backup/pgbackrest"
+PGBR_BIN="${PGBR_HOME}/bin/pgbackrest"
+PGBR_CONF="${PGBR_HOME}/conf/pgbackrest.conf"
+_pgbr_stanza=$(grep -o -- '--stanza=[^ "]*' "${WORK}/src.yml" | head -1 | cut -d= -f2)
+if [[ "${ADD_MODE}" == "a" && -n "${_pgbr_stanza}" && -f "${PGBR_CONF}" ]] \
+   && grep -qxF "[${_pgbr_stanza}]" "${PGBR_CONF}"; then
+    phase "8-B  |  pgBackRest 저장소에 ${NEW_NAME} 추가"
+    _repo_host=$(ssh ${SSH_OPTS} "${SRC_HOST}" "sed -n 's/^repo1-host=//p' '${PGBR_CONF}'" 2>/dev/null | head -1)
+    _u=$(id -un)
+    _key=$(ssh ${SSH_OPTS} "${NEW_HOST}" \
+        'test -f ~/.ssh/id_rsa.pub || ssh-keygen -q -t rsa -N "" -f ~/.ssh/id_rsa >/dev/null; cat ~/.ssh/id_rsa.pub' 2>>"${HA_LOG}")
+    mkdir -p ~/.ssh && touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys
+    [[ -n "${_key}" ]] && { grep -qxF "${_key}" ~/.ssh/authorized_keys || echo "${_key}" >> ~/.ssh/authorized_keys; }
+    if [[ -n "${_repo_host}" ]] && ssh ${SSH_OPTS} "${NEW_HOST}" \
+        "ssh -o BatchMode=yes -o StrictHostKeyChecking=no -p ${HA_SSH_PORT} ${_u}@${_repo_host} true" >> "${HA_LOG}" 2>&1; then
+        info "${NEW_HOST} → ${_repo_host} SSH 확인 (archive-push 경로)"
+    else
+        warn "${NEW_HOST} → 저장소(${_repo_host:-?}) SSH 실패 — ${NEW_HOST} 에서 ssh-copy-id ${_u}@${_repo_host:-<etcd>}"
+    fi
+    # 현재 stanza 섹션 + 새 pgN-host
+    _body=$(awk -v s="[${_pgbr_stanza}]" '/^\[/{f=($0==s);next} f&&NF' "${PGBR_CONF}")
+    if grep -q "^pg[0-9]*-host=${NEW_HOST}$" <<< "${_body}"; then
+        info "저장소 설정에 이미 ${NEW_HOST} 가 있습니다"
+    else
+        _n=$(( $(grep -o '^pg[0-9]*-host=' <<< "${_body}" | tr -dc '0-9\n' | sort -n | tail -1) + 1 ))
+        _hu=$(grep -m1 '^pg1-host-user=' <<< "${_body}" | cut -d= -f2)
+        _hp=$(grep -m1 '^pg1-host-port=' <<< "${_body}" | cut -d= -f2)
+        {
+            echo "${_body}"
+            echo "pg${_n}-host=${NEW_HOST}"
+            echo "pg${_n}-host-user=${_hu:-${_u}}"
+            [[ -n "${_hp}" ]] && echo "pg${_n}-host-port=${_hp}"
+            echo "pg${_n}-host-cmd=${PGBR_BIN}"
+            echo "pg${_n}-host-config=${PGBR_CONF}"
+            echo "pg${_n}-path=${DATA_PATH}"
+            echo "pg${_n}-port=${PG_PORT}"
+            echo "pg${_n}-user=postgres"
+        } | fn_pgbr_conf_put "${PGBR_CONF}" "${_pgbr_stanza}"
+        info "저장소 설정에 pg${_n}-host=${NEW_HOST} 추가 (${PGBR_CONF})"
+    fi
+    "${PGBR_BIN}" --stanza="${_pgbr_stanza}" check >> "${HA_LOG}" 2>&1 \
+        && info "pgbackrest check 정상" \
+        || warn "pgbackrest check 실패 — ${PGBR_HOME}/log/ 확인"
+fi
 
 # ============================================================
 #  9. 결과
