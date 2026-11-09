@@ -155,6 +155,15 @@ fn_install_pkg_local() {
 fn_build_pg_local() {
     local BUILD_CPU="${1:-${CPU_CORES}}"
 
+    # ── 빌드 도구 확인 (PKG 에 빠졌으면 configure 전에 명확히 멈춤) ──
+    local _need=() _t
+    for _t in gcc make bison flex; do command -v "${_t}" &>/dev/null || _need+=("${_t}"); done
+    if [[ ${#_need[@]} -gt 0 ]]; then
+        error "빌드 도구 없음: ${_need[*]}
+    PKG 에 rpm 이 제대로 들어있지 않습니다:  ls ${INSTALLER_DIR}/../PKG | wc -l
+    pg_download.sh 로 다시 받은 뒤 installer/PKG.tar.gz 를 지우고 재실행하세요."
+    fi
+
     # ── configure 옵션 ──────────────────────────────────────
     #  installer/build_features.txt (pg_download.sh 생성) 의 BASE 는 항상,
     #  FEATURE 는 라이브러리(-devel)가 실제로 설치돼 있는 것만 켠다.
