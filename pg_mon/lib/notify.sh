@@ -40,7 +40,10 @@ _notify_webhook() {
     [[ -z "$NOTIFY_WEBHOOK_URL" ]] && return 0
     command -v curl &>/dev/null || return 1
     local text="[pgmon] ${N_EVENT} ${N_SEVERITY} ${N_DB} ${N_METRIC}=${N_VALUE} (임계값 ${N_THRESHOLD}) ${N_MESSAGE}"
+    # JSON 문자열 이스케이프: \ " 그리고 개행/탭/기타 제어문자 (메시지에 개행이 있으면 JSON 이 깨져 알림 누락되던 문제)
     text="${text//\\/\\\\}"; text="${text//\"/\\\"}"
+    text="${text//$'\n'/\\n}"; text="${text//$'\r'/\\r}"; text="${text//$'\t'/\\t}"
+    text=$(printf '%s' "$text" | tr -d '\000-\010\013\014\016-\037')
     # TODO: 대상 시스템 형식에 맞게 payload 조정 (Slack/Teams 는 {"text": ...} 로 동작)
     curl -fsS -m "$NOTIFY_TIMEOUT" -H 'Content-Type: application/json' \
         -d "{\"text\":\"${text}\"}" "$NOTIFY_WEBHOOK_URL" >/dev/null 2>&1

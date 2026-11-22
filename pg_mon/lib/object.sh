@@ -142,7 +142,7 @@ LIMIT 30" | while IFS='|' read -r tbl idx sz; do
                 # 상위 10 dead tup 테이블에만 pgstattuple 실행 (비용 절감)
                 local top_tables
                 top_tables=$(_psql "
-SELECT schemaname||'.'||relname
+SELECT relid::regclass::text
 FROM pg_stat_user_tables
 ORDER BY n_dead_tup DESC LIMIT 10")
 
@@ -151,12 +151,12 @@ ORDER BY n_dead_tup DESC LIMIT 10")
                     local bloat_row
                     bloat_row=$(_psql "
 SELECT
-    pg_total_relation_size('${tname}'),
+    pg_total_relation_size('${tname//\'/\'\'}'::regclass),
     free_space,
     dead_tuple_len,
     round((free_space+dead_tuple_len)*100.0 /
-          NULLIF(pg_total_relation_size('${tname}'),0),1)
-FROM pgstattuple('${tname}')" 2>/dev/null)
+          NULLIF(pg_total_relation_size('${tname//\'/\'\'}'::regclass),0),1)
+FROM pgstattuple('${tname//\'/\'\'}'::regclass)" 2>/dev/null)
                     if [[ -n "$bloat_row" ]]; then
                         IFS='|' read -r tot free dead ratio <<< "$bloat_row"
                         local tot_fmt; tot_fmt=$(fmt_bytes "${tot:-0}")
