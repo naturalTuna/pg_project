@@ -46,7 +46,7 @@ _os_snap_ssh() {
     k="TARGET_${idx}_HOST";     host="${!k}"
     k="TARGET_${idx}_SSH_USER"; sshu="${!k:-$(whoami)}"
     k="TARGET_${idx}_SSH_PORT"; sshp="${!k:-22}"
-    ssh -n -o BatchMode=yes -o ConnectTimeout=3 -o StrictHostKeyChecking=no \
+    ssh -n -o BatchMode=yes -o ConnectTimeout=3 -o StrictHostKeyChecking=accept-new \
         -p "$sshp" "${sshu}@${host}" \
         'echo "##HOST"; cat /proc/sys/kernel/hostname;
          echo "##STAT"; cat /proc/stat;

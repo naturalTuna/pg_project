@@ -8,8 +8,8 @@
 # ████████████████  HA MODE  █████████████████████████████████
 # ============================================================
 
-    SSH_OPTS="-o StrictHostKeyChecking=no -p ${HA_SSH_PORT}"
-    SCP_OPTS="-P ${HA_SSH_PORT} -o StrictHostKeyChecking=no"
+    SSH_OPTS="-o StrictHostKeyChecking=accept-new -p ${HA_SSH_PORT}"
+    SCP_OPTS="-P ${HA_SSH_PORT} -o StrictHostKeyChecking=accept-new"
 
     # ── etcd 서버의 기존 single PostgreSQL 보호 ───────────────
     #  pgmon 저장소 DB 를 etcd 서버에 single 로 설치해 둔 상태에서 HA 를 (재)설치하면
@@ -84,7 +84,7 @@
     # 2) Primary → Standby / Standby → Primary SSH 키 교환 확인
     info "[CHECK 2/4] SSH 키 교환 확인 (Primary ↔ Standby)..."
     if ssh ${SSH_OPTS} -o BatchMode=yes "${HA_PRIMARY_HOST}" \
-        "ssh -o BatchMode=yes -o StrictHostKeyChecking=no -p ${HA_SSH_PORT} \
+        "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -p ${HA_SSH_PORT} \
          $(whoami)@${HA_STANDBY_HOST} exit" >> "${HA_LOG}" 2>&1; then
         info "  ✔ Primary → Standby SSH 접속 가능"
     else
@@ -95,7 +95,7 @@
         PREFLIGHT_OK=false
     fi
     if ssh ${SSH_OPTS} -o BatchMode=yes "${HA_STANDBY_HOST}" \
-        "ssh -o BatchMode=yes -o StrictHostKeyChecking=no -p ${HA_SSH_PORT} \
+        "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -p ${HA_SSH_PORT} \
          $(whoami)@${HA_PRIMARY_HOST} exit" >> "${HA_LOG}" 2>&1; then
         info "  ✔ Standby → Primary SSH 접속 가능"
     else
@@ -239,14 +239,15 @@ WantedBy=multi-user.target'
                   "etcd3|${HA_STANDBY_HOST}|${HA_STANDBY_IP}"; do
             IFS='|' read -r _en _eh _eip <<< "${_m}"
             info "[${_en}] ${_eh} (${_eip}) etcd 설치 중..."
-            scp ${SCP_OPTS} "${ETCD_TARBALL}" "${_eh}:/tmp/etcd.tar.gz" >> "${HA_LOG}" 2>&1
+            _RT=$(fn_remote_tmpdir "${_eh}")
+            scp ${SCP_OPTS} "${ETCD_TARBALL}" "${_eh}:${_RT}/etcd.tar.gz" >> "${HA_LOG}" 2>&1
             ssh ${SSH_OPTS} "${_eh}" bash >> "${HA_LOG}" 2>&1 <<RETCD
 set -e
 sudo systemctl stop etcd 2>/dev/null || true
 sudo rm -rf /var/lib/etcd
 sudo mkdir -p /var/lib/etcd ${ETCD_INSTALL_DIR} /etc/etcd
-sudo tar -zxf /tmp/etcd.tar.gz -C ${ETCD_INSTALL_DIR} --strip-components=1
-rm -f /tmp/etcd.tar.gz
+sudo tar -zxf ${_RT}/etcd.tar.gz -C ${ETCD_INSTALL_DIR} --strip-components=1
+rm -rf ${_RT}
 sudo ln -sf ${ETCD_INSTALL_DIR}/etcd    /usr/local/bin/etcd
 sudo ln -sf ${ETCD_INSTALL_DIR}/etcdctl /usr/local/bin/etcdctl
 sudo tee /etc/etcd/etcd.conf > /dev/null <<'CONF'
@@ -331,15 +332,16 @@ RMKDIR
     # 3-3. PKG rpm 설치 (Primary - 런타임 라이브러리용)
     if [[ -f "${PKG_TGZ}" ]]; then
         info "[Primary] 의존 패키지(rpm) 전송 및 설치 중..."
-        scp ${SCP_OPTS} "${PKG_TGZ}" "${HA_PRIMARY_HOST}:/tmp/" >> "${HA_LOG}" 2>&1
+        _RT=$(fn_remote_tmpdir "${HA_PRIMARY_HOST}")
+        scp ${SCP_OPTS} "${PKG_TGZ}" "${HA_PRIMARY_HOST}:${_RT}/PKG.tar.gz" >> "${HA_LOG}" 2>&1
         ssh ${SSH_OPTS} "${HA_PRIMARY_HOST}" bash >> "${HA_LOG}" 2>&1 <<RPKG
 TMP=\$(mktemp -d)
-tar -zxf /tmp/PKG.tar.gz -C "\${TMP}"
+tar -zxf "${_RT}/PKG.tar.gz" -C "\${TMP}"
 # dnf 로 설치 가능한 것만 설치 (--skip-broken: -devel 등 버전이 안 맞는 일부 때문에 전체가 실패하지 않도록)
 sudo dnf install -y --skip-broken "\${TMP}"/PKG/*.rpm \
     || sudo rpm -Uvh --force --nodeps "\${TMP}"/PKG/*.rpm \
     || true
-rm -rf "\${TMP}" /tmp/PKG.tar.gz
+rm -rf "\${TMP}" "${_RT}"
 echo "[CHECK] pip3: \$(command -v pip3 || echo 없음)"
 echo "[CHECK] 없는 라이브러리: \$(ldd ${ENGINE_PATH}/bin/postgres 2>/dev/null | awk '/not found/{print \$1}' | tr '\\n' ' ')"
 RPKG
@@ -367,103 +369,21 @@ RBASHRC_PRI
     PRI_CONF_TMP=$(mktemp)
     fn_gen_conf "${PRI_CONF_TMP}" "${PRI_CPU}" "${PRI_MEM_GB}" "ha" "${ARC_PATH}"
     scp ${SCP_OPTS} "${PRI_CONF_TMP}" \
-        "${HA_PRIMARY_HOST}:/tmp/postgresql.conf.patroni" >> "${HA_LOG}" 2>&1
+        "${HA_PRIMARY_HOST}:${ENGINE_PATH}/etc/postgresql.conf.patroni" >> "${HA_LOG}" 2>&1
     rm -f "${PRI_CONF_TMP}"
-    info "[Primary] postgresql.conf 전송 완료 (/tmp — Patroni 기동 후 적용 예정)"
+    info "[Primary] postgresql.conf 전송 완료 (엔진 etc — Patroni 기동 후 적용 예정)"
     # ※ initdb는 Patroni가 직접 수행 (PGDATA가 비어있어야 bootstrap → Leader 선출 가능)
 
     # 3-7. patroni.yml 생성 및 systemd 등록 (Primary)
     info "[Primary] patroni.yml 및 systemd 서비스 등록 중..."
     PATRONI_USER=$(whoami)
 
+    # patroni.yml 은 로컬에서 생성해 0600 으로 전송 (비밀번호가 원격 셸에서 해석되지 않도록)
+    fn_put_patroni_yml "${HA_PRIMARY_HOST}" primary
+    # 운영/백업 스크립트용 ~/.pgpass (0600) — pg_hba 에 trust 가 없으므로 필요
+    fn_pgpass_remote "${HA_PRIMARY_HOST}" "${REPL_USER_HA}" "${REPL_PASS_HA}" "${SU_NAME}" "${SU_PASS}" >> "${HA_LOG}" 2>&1 \
+        || error "[Primary] ~/.pgpass 생성 실패"
     ssh ${SSH_OPTS} "${HA_PRIMARY_HOST}" bash >> "${HA_LOG}" 2>&1 <<RPATRONI_CONF_PRI
-mkdir -p "${ENGINE_PATH}/etc/patroni"
-# 구버전 /etc/patroni 심볼릭 링크 (patronictl 기본 경로 호환용)
-sudo mkdir -p /etc/patroni
-sudo ln -sf "${ENGINE_PATH}/etc/patroni/patroni.yml" /etc/patroni/patroni.yml 2>/dev/null || true
-cat > "${ENGINE_PATH}/etc/patroni/patroni.yml" <<PYML
-scope: ${CLUSTER_NAME}
-namespace: /db/
-name: primary
-
-$(fn_patroni_watchdog_yaml)
-
-restapi:
-  listen: ${HA_PRIMARY_HOST}:8008
-  connect_address: ${HA_PRIMARY_HOST}:8008
-
-etcd3:
-  hosts: ${PATRONI_ETCD_HOSTS}
-
-bootstrap:
-  dcs:
-    ttl: 30
-    loop_wait: 10
-    retry_timeout: 10
-    maximum_lag_on_failover: 1048576
-$(fn_patroni_dcs_safety_yaml)
-    postgresql:
-      use_pg_rewind: true
-      use_slots: true
-      parameters:
-        wal_level: replica
-        hot_standby: on
-        max_wal_senders: 10
-        max_replication_slots: 10
-        wal_keep_size: 512MB
-        shared_preload_libraries: pg_stat_statements
-        track_io_timing: on
-$(fn_patroni_archive_params_yaml)
-
-  initdb:
-    - encoding: UTF8
-    - locale: ${PG_LOCALE}
-    - data-checksums
-
-  pg_hba:
-    - local all             all                               trust
-    - host  all             all             127.0.0.1/32      trust
-    - host  all             all             ::1/128           trust
-    - local replication     all                               trust
-    - host  replication     all             127.0.0.1/32      trust
-    - host  replication     all             ::1/128           trust
-    - host replication ${REPL_USER_HA} ${HA_PRIMARY_IP}/24 trust
-    - host replication ${REPL_USER_HA} ${HA_STANDBY_IP}/24 trust
-    - host postgres    ${REPL_USER_HA} ${HA_PRIMARY_IP}/24 trust
-    - host postgres    ${REPL_USER_HA} ${HA_STANDBY_IP}/24 trust
-    - host all         all             ${HA_PRIMARY_IP}/24 trust
-    - host all         all             ${HA_STANDBY_IP}/24 trust
-    - host all         all             0.0.0.0/0             scram-sha-256
-
-  users:
-    ${REPL_USER_HA}:
-      password: ${REPL_PASS_HA}
-      options:
-        - replication
-
-postgresql:
-  listen: 0.0.0.0:${PG_PORT}   # VIP 로 들어오는 접속도 받기 위해 전체 주소 (connect_address 는 노드 주소)
-  connect_address: ${HA_PRIMARY_HOST}:${PG_PORT}
-  data_dir: ${DATA_PATH}
-  bin_dir: ${ENGINE_PATH}/bin
-  pgpass: ${HOME_DIR}/.pgpass
-$(fn_patroni_restore_yaml)
-$(fn_patroni_callbacks_yaml)
-  authentication:
-    replication:
-      username: ${REPL_USER_HA}
-      password: ${REPL_PASS_HA}
-    superuser:
-      username: postgres
-      password: postgres
-
-tags:
-  nofailover: false
-  noloadbalance: false
-  clonefrom: false
-  nosync: false
-PYML
-
 sudo bash -c "cat > /etc/systemd/system/patroni.service" <<SVC
 [Unit]
 Description=Patroni PostgreSQL HA
@@ -515,15 +435,16 @@ SMKDIR
     # 4-3. PKG rpm 설치 (Standby)
     if [[ -f "${PKG_TGZ}" ]]; then
         info "[Standby] 의존 패키지(rpm) 전송 및 설치 중..."
-        scp ${SCP_OPTS} "${PKG_TGZ}" "${HA_STANDBY_HOST}:/tmp/" >> "${HA_LOG}" 2>&1
+        _RT=$(fn_remote_tmpdir "${HA_STANDBY_HOST}")
+        scp ${SCP_OPTS} "${PKG_TGZ}" "${HA_STANDBY_HOST}:${_RT}/PKG.tar.gz" >> "${HA_LOG}" 2>&1
         ssh ${SSH_OPTS} "${HA_STANDBY_HOST}" bash >> "${HA_LOG}" 2>&1 <<SPKG
 TMP=\$(mktemp -d)
-tar -zxf /tmp/PKG.tar.gz -C "\${TMP}"
+tar -zxf "${_RT}/PKG.tar.gz" -C "\${TMP}"
 # dnf 로 설치 가능한 것만 설치 (--skip-broken: -devel 등 버전이 안 맞는 일부 때문에 전체가 실패하지 않도록)
 sudo dnf install -y --skip-broken "\${TMP}"/PKG/*.rpm \
     || sudo rpm -Uvh --force --nodeps "\${TMP}"/PKG/*.rpm \
     || true
-rm -rf "\${TMP}" /tmp/PKG.tar.gz
+rm -rf "\${TMP}" "${_RT}"
 echo "[CHECK] pip3: \$(command -v pip3 || echo 없음)"
 echo "[CHECK] 없는 라이브러리: \$(ldd ${ENGINE_PATH}/bin/postgres 2>/dev/null | awk '/not found/{print \$1}' | tr '\\n' ' ')"
 SPKG
@@ -551,101 +472,20 @@ RBASHRC_SBY
     SBY_CONF_TMP=$(mktemp)
     fn_gen_conf "${SBY_CONF_TMP}" "${SBY_CPU}" "${SBY_MEM_GB}" "ha" "${ARC_PATH}"
     scp ${SCP_OPTS} "${SBY_CONF_TMP}" \
-        "${HA_STANDBY_HOST}:/tmp/postgresql.conf.patroni" >> "${HA_LOG}" 2>&1
+        "${HA_STANDBY_HOST}:${ENGINE_PATH}/etc/postgresql.conf.patroni" >> "${HA_LOG}" 2>&1
     rm -f "${SBY_CONF_TMP}"
-    info "[Standby] postgresql.conf 전송 완료 (/tmp — Patroni 클론 후 적용 예정)"
+    info "[Standby] postgresql.conf 전송 완료 (엔진 etc — Patroni 클론 후 적용 예정)"
     # ※ Standby는 PGDATA를 비워두고, Patroni가 pg_basebackup으로 Primary를 클론
 
     # 4-6. patroni.yml 생성 및 systemd 등록 (Standby)
     info "[Standby] patroni.yml 및 systemd 서비스 등록 중..."
 
+    # patroni.yml 은 로컬에서 생성해 0600 으로 전송 (비밀번호가 원격 셸에서 해석되지 않도록)
+    fn_put_patroni_yml "${HA_STANDBY_HOST}" standby
+    # 운영/백업 스크립트용 ~/.pgpass (0600) — pg_hba 에 trust 가 없으므로 필요
+    fn_pgpass_remote "${HA_STANDBY_HOST}" "${REPL_USER_HA}" "${REPL_PASS_HA}" "${SU_NAME}" "${SU_PASS}" >> "${HA_LOG}" 2>&1 \
+        || error "[Standby] ~/.pgpass 생성 실패"
     ssh ${SSH_OPTS} "${HA_STANDBY_HOST}" bash >> "${HA_LOG}" 2>&1 <<RPATRONI_CONF_SBY
-mkdir -p "${ENGINE_PATH}/etc/patroni"
-sudo mkdir -p /etc/patroni
-sudo ln -sf "${ENGINE_PATH}/etc/patroni/patroni.yml" /etc/patroni/patroni.yml 2>/dev/null || true
-cat > "${ENGINE_PATH}/etc/patroni/patroni.yml" <<PYML
-scope: ${CLUSTER_NAME}
-namespace: /db/
-name: standby
-
-$(fn_patroni_watchdog_yaml)
-
-restapi:
-  listen: ${HA_STANDBY_HOST}:8008
-  connect_address: ${HA_STANDBY_HOST}:8008
-
-etcd3:
-  hosts: ${PATRONI_ETCD_HOSTS}
-
-bootstrap:
-  dcs:
-    ttl: 30
-    loop_wait: 10
-    retry_timeout: 10
-    maximum_lag_on_failover: 1048576
-$(fn_patroni_dcs_safety_yaml)
-    postgresql:
-      use_pg_rewind: true
-      use_slots: true
-      parameters:
-        wal_level: replica
-        hot_standby: on
-        max_wal_senders: 10
-        max_replication_slots: 10
-        wal_keep_size: 512MB
-        shared_preload_libraries: pg_stat_statements
-        track_io_timing: on
-$(fn_patroni_archive_params_yaml)
-
-  initdb:
-    - encoding: UTF8
-    - locale: ${PG_LOCALE}
-    - data-checksums
-
-  pg_hba:
-    - local all             all                               trust
-    - host  all             all             127.0.0.1/32      trust
-    - host  all             all             ::1/128           trust
-    - local replication     all                               trust
-    - host  replication     all             127.0.0.1/32      trust
-    - host  replication     all             ::1/128           trust
-    - host replication ${REPL_USER_HA} ${HA_PRIMARY_IP}/24 trust
-    - host replication ${REPL_USER_HA} ${HA_STANDBY_IP}/24 trust
-    - host postgres    ${REPL_USER_HA} ${HA_PRIMARY_IP}/24 trust
-    - host postgres    ${REPL_USER_HA} ${HA_STANDBY_IP}/24 trust
-    - host all         all             ${HA_PRIMARY_IP}/24 trust
-    - host all         all             ${HA_STANDBY_IP}/24 trust
-    - host all         all             0.0.0.0/0             scram-sha-256
-
-  users:
-    ${REPL_USER_HA}:
-      password: ${REPL_PASS_HA}
-      options:
-        - replication
-
-postgresql:
-  listen: 0.0.0.0:${PG_PORT}   # VIP 로 들어오는 접속도 받기 위해 전체 주소 (connect_address 는 노드 주소)
-  connect_address: ${HA_STANDBY_HOST}:${PG_PORT}
-  data_dir: ${DATA_PATH}
-  bin_dir: ${ENGINE_PATH}/bin
-  pgpass: ${HOME_DIR}/.pgpass
-$(fn_patroni_restore_yaml)
-$(fn_patroni_callbacks_yaml)
-  authentication:
-    replication:
-      username: ${REPL_USER_HA}
-      password: ${REPL_PASS_HA}
-    superuser:
-      username: postgres
-      password: postgres
-
-tags:
-  nofailover: false
-  noloadbalance: false
-  clonefrom: false
-  nosync: false
-PYML
-
 sudo bash -c "cat > /etc/systemd/system/patroni.service" <<SVC
 [Unit]
 Description=Patroni PostgreSQL HA
@@ -729,17 +569,17 @@ PUPDATE_SVC
     # postgresql.conf 적용 (Patroni가 initdb 완료 후 PGDATA가 생긴 시점에 덮어쓰기)
     info "[Primary] postgresql.conf 적용 중..."
     ssh ${SSH_OPTS} "${HA_PRIMARY_HOST}" bash >> "${HA_LOG}" 2>&1 <<PAPPLY_CONF
-if [[ -f /tmp/postgresql.conf.patroni ]]; then
+if [[ -f ${ENGINE_PATH}/etc/postgresql.conf.patroni ]]; then
     # Patroni 는 postgresql.conf 를 직접 관리하고(primary_conninfo, listen 등)
     # initdb/클론 시 생긴 원본은 postgresql.base.conf 로 옮겨 include 한다.
     # postgresql.conf 를 덮어쓰면 Patroni 설정이 날아가므로 base.conf 에 적용.
     if [[ -f "${DATA_PATH}/postgresql.base.conf" ]]; then
-        cp /tmp/postgresql.conf.patroni "${DATA_PATH}/postgresql.base.conf"
+        cp ${ENGINE_PATH}/etc/postgresql.conf.patroni "${DATA_PATH}/postgresql.base.conf"
     else
-        echo "[WARN] postgresql.base.conf 없음 — 튜닝 conf 미적용 (/tmp/postgresql.conf.patroni 보존)"
+        echo "[WARN] postgresql.base.conf 없음 — 튜닝 conf 미적용 (${ENGINE_PATH}/etc/postgresql.conf.patroni 보존)"
         exit 0
     fi
-    rm -f /tmp/postgresql.conf.patroni
+    rm -f ${ENGINE_PATH}/etc/postgresql.conf.patroni
     ${ENGINE_PATH}/bin/pg_ctl reload -D "${DATA_PATH}" 2>/dev/null || true
 fi
 PAPPLY_CONF
@@ -750,7 +590,7 @@ PAPPLY_CONF
     #   Standby 는 Patroni 가 pg_basebackup 으로 클론하므로 자동 복제됨
     info "[Primary] postgres 스키마/search_path 설정 중..."
     ssh ${SSH_OPTS} "${HA_PRIMARY_HOST}" \
-        "${ENGINE_PATH}/bin/psql -p ${PG_PORT} -U postgres -d postgres \
+        "${ENGINE_PATH}/bin/psql -w -p ${PG_PORT} -U postgres -d postgres \
          -c \"CREATE EXTENSION IF NOT EXISTS pg_stat_statements SCHEMA public;\" \
          -c \"CREATE SCHEMA IF NOT EXISTS postgres AUTHORIZATION postgres;\" \
          -c \"ALTER ROLE postgres SET search_path = postgres, public;\" \
@@ -804,17 +644,17 @@ SUPDATE_SVC
         # postgresql.conf 적용 (pg_basebackup 클론 완료 후 PGDATA 생긴 시점)
         info "[Standby] postgresql.conf 적용 중..."
         ssh ${SSH_OPTS} "${HA_STANDBY_HOST}" bash >> "${HA_LOG}" 2>&1 <<SAPPLY_CONF
-if [[ -f /tmp/postgresql.conf.patroni ]]; then
+if [[ -f ${ENGINE_PATH}/etc/postgresql.conf.patroni ]]; then
     # Patroni 는 postgresql.conf 를 직접 관리하고(primary_conninfo, listen 등)
     # initdb/클론 시 생긴 원본은 postgresql.base.conf 로 옮겨 include 한다.
     # postgresql.conf 를 덮어쓰면 Patroni 설정이 날아가므로 base.conf 에 적용.
     if [[ -f "${DATA_PATH}/postgresql.base.conf" ]]; then
-        cp /tmp/postgresql.conf.patroni "${DATA_PATH}/postgresql.base.conf"
+        cp ${ENGINE_PATH}/etc/postgresql.conf.patroni "${DATA_PATH}/postgresql.base.conf"
     else
-        echo "[WARN] postgresql.base.conf 없음 — 튜닝 conf 미적용 (/tmp/postgresql.conf.patroni 보존)"
+        echo "[WARN] postgresql.base.conf 없음 — 튜닝 conf 미적용 (${ENGINE_PATH}/etc/postgresql.conf.patroni 보존)"
         exit 0
     fi
-    rm -f /tmp/postgresql.conf.patroni
+    rm -f ${ENGINE_PATH}/etc/postgresql.conf.patroni
     ${ENGINE_PATH}/bin/pg_ctl reload -D "${DATA_PATH}" 2>/dev/null || true
 fi
 SAPPLY_CONF
@@ -881,6 +721,8 @@ SAPPLY_CONF
     echo -e "${BOLD}  ║${NC}  백업 서버 : ${BACKUP_HOST_LABEL} (${BACKUP_HOST})"
     fn_pgbr_on && \
     echo -e "${BOLD}  ║${NC}  백업      : pgBackRest 저장소 = etcd 서버 ${PGBR_REPO} (stanza ${PGBR_STANZA})"
+    echo -e "${BOLD}  ║${NC}  인증      : pg_hba 전부 scram-sha-256 (trust 없음)"
+    echo -e "${BOLD}  ║${NC}  패스워드  : 각 DB 노드 ~/.pgpass (0600) / Patroni REST·superuser 는 patroni.yml (0600)"
     echo -e "${BOLD}  ╠══════════════════════════════════════════════╣${NC}"
     echo -e "${BOLD}  ║${NC}  클러스터 상태 확인 (Primary 서버에서):"
     echo -e "${BOLD}  ║${NC}    patronictl -c ${ENGINE_PATH}/etc/patroni/patroni.yml list"

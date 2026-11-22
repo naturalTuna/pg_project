@@ -49,8 +49,8 @@ echo -e "${NC}  로그: ${HA_LOG}"
 phase "1  |  기존 클러스터 확인"
 read -rp "  SSH 포트 [22]: " HA_SSH_PORT
 HA_SSH_PORT="${HA_SSH_PORT:-22}"
-SSH_OPTS="-o StrictHostKeyChecking=no -o BatchMode=yes -p ${HA_SSH_PORT}"
-SCP_OPTS="-P ${HA_SSH_PORT} -o StrictHostKeyChecking=no -o BatchMode=yes"
+SSH_OPTS="-o StrictHostKeyChecking=accept-new -o BatchMode=yes -p ${HA_SSH_PORT}"
+SCP_OPTS="-P ${HA_SSH_PORT} -o StrictHostKeyChecking=accept-new -o BatchMode=yes"
 
 read -rp "  기존 클러스터 DB 노드 (Primary / Standby 아무거나, IP 또는 호스트명): " SRC_HOST
 [[ -n "${SRC_HOST}" ]] || error "기존 노드를 입력하세요"
@@ -82,6 +82,8 @@ vals = {
     "PG_PORT":     port,
     "REPL_USER":   rep.group(1) if rep else "replicator",
     "WD_MODE":     g(r'^watchdog:\s*\n\s+mode:\s*(\S+)', "off"),
+    "API_USER":    g(r'^restapi:(?:\n[ \t]+.*)*?\n[ \t]+authentication:\s*(?:#.*)?\n[ \t]+username:\s*(\S+)'),
+    "API_PASS":    g(r'^restapi:(?:\n[ \t]+.*)*?\n[ \t]+authentication:\s*(?:#.*)?\n[ \t]+username:.*\n[ \t]+password:\s*(\S+)'),
     "HAS_CB":      "y" if re.search(r'^\s+callbacks:', t, re.M) else "n",
 }
 for k, v in vals.items():
@@ -235,12 +237,13 @@ if [[ -d "${PKG_DIR}" ]] && [[ -n "$(ls -A "${PKG_DIR}" 2>/dev/null)" ]]; then
 fi
 if [[ -f "${PKG_TGZ}" ]]; then
     info "의존 패키지(rpm) 전송 및 설치 중..."
-    scp ${SCP_OPTS} "${PKG_TGZ}" "${NEW_HOST}:/tmp/PKG.tar.gz" >> "${HA_LOG}" 2>&1
-    ssh ${SSH_OPTS} "${NEW_HOST}" bash >> "${HA_LOG}" 2>&1 <<'RPKG'
-TMP=$(mktemp -d)
-tar -zxf /tmp/PKG.tar.gz -C "${TMP}"
+    _RT=$(fn_remote_tmpdir "${NEW_HOST}")
+    scp ${SCP_OPTS} "${PKG_TGZ}" "${NEW_HOST}:${_RT}/PKG.tar.gz" >> "${HA_LOG}" 2>&1
+    ssh ${SSH_OPTS} "${NEW_HOST}" bash -s -- "${_RT}" >> "${HA_LOG}" 2>&1 <<'RPKG'
+RT="$1"; TMP=$(mktemp -d)
+tar -zxf "${RT}/PKG.tar.gz" -C "${TMP}"
 sudo dnf install -y --skip-broken "${TMP}"/PKG/*.rpm || sudo rpm -Uvh --force --nodeps "${TMP}"/PKG/*.rpm || true
-rm -rf "${TMP}" /tmp/PKG.tar.gz
+rm -rf "${TMP}" "${RT}"
 RPKG
     info "의존 패키지 설치 완료"
 else
@@ -266,6 +269,15 @@ done
 RRC
 info ".postgresrc 설정 완료"
 
+# ~/.pgpass (pg_hba 는 scram-sha-256 만 → 운영/백업 스크립트가 쓰는 패스워드 파일도 같이)
+if ssh ${SSH_OPTS} "${SRC_HOST}" "test -s ~/.pgpass" 2>/dev/null; then
+    ssh ${SSH_OPTS} "${SRC_HOST}" "cat ~/.pgpass" 2>/dev/null \
+      | ssh ${SSH_OPTS} "${NEW_HOST}" "umask 077; cat > ~/.pgpass; chmod 600 ~/.pgpass" 2>>"${HA_LOG}" \
+      && info "~/.pgpass 복사 완료 (0600)" || warn "~/.pgpass 복사 실패 — 새 노드에서 수동 생성 필요"
+else
+    warn "${SRC_HOST} 에 ~/.pgpass 가 없습니다 — 새 노드에서 psql/백업 스크립트가 패스워드를 물을 수 있음"
+fi
+
 # ============================================================
 #  5. 기존 클러스터 쪽 준비 (pg_hba / DR 슬롯)
 # ============================================================
@@ -283,10 +295,10 @@ python3 - "${HBA}" "${RU}" "${IP}" "${NM}" <<'PY'
 import re, sys
 p, ru, ip, nm = sys.argv[1:]
 L = open(p).read().split("\n")
+# trust 없이 scram-sha-256 (일반 접속은 마지막 0.0.0.0/0 scram 규칙으로 허용됨)
 add = ["# add_node.sh: " + nm,
-       "host replication %s %s/32 trust" % (ru, ip),
-       "host postgres    %s %s/32 trust" % (ru, ip),
-       "host all         all %s/32 trust" % ip]
+       "host replication %s %s/32 scram-sha-256" % (ru, ip),
+       "host postgres    %s %s/32 scram-sha-256" % (ru, ip)]
 idx = next((i for i, l in enumerate(L) if re.match(r"\s*host\s+\S+\s+\S+\s+0\.0\.0\.0/0", l)), None)
 L = L + add if idx is None else L[:idx] + add + L[idx:]
 open(p, "w").write("\n".join(L))
@@ -304,8 +316,11 @@ if [[ "${ADD_MODE}" == "b" ]]; then
     # 메인 클러스터에 영구 복제 슬롯 (Patroni 가 관리, failover 후에도 새 Primary 에 유지)
     #   Patroni REST PATCH /config (DCS 설정 병합) — 실패 시 기존 노드에서 로컬로 재시도
     _slot_json="{\"slots\":{\"${DR_SLOT}\":{\"type\":\"physical\"}}}"
-    if curl -sf -XPATCH -d "${_slot_json}" "http://${SRC_HOST}:8008/config" >> "${HA_LOG}" 2>&1 \
-       || ssh ${SSH_OPTS} "${SRC_HOST}" "curl -sf -XPATCH -d '${_slot_json}' http://${SRC_HOST}:8008/config" >> "${HA_LOG}" 2>&1; then
+    # REST API 인증 (patroni.yml restapi.authentication) — 없으면 예전 클러스터라 인증 없이
+    _api_auth=()
+    [[ -n "${API_USER}" ]] && _api_auth=(-u "${API_USER}:${API_PASS}")
+    if curl -sf "${_api_auth[@]}" -XPATCH -d "${_slot_json}" "http://${SRC_HOST}:8008/config" >> "${HA_LOG}" 2>&1 \
+       || ssh ${SSH_OPTS} "${SRC_HOST}" "${PATRONICTL} edit-config --force -s 'slots.${DR_SLOT}.type=physical'" >> "${HA_LOG}" 2>&1; then
         info "메인 클러스터에 영구 복제 슬롯 생성: ${DR_SLOT}"
     else
         warn "슬롯 생성 실패 — 메인에서 수동: ${PATRONICTL} edit-config  → slots: {${DR_SLOT}: {type: physical}} 추가"
@@ -400,7 +415,8 @@ fn_setup_watchdog "${NEW_HOST}"
 # ============================================================
 if [[ "${ADD_MODE}" == "b" ]]; then
     phase "7  |  DR etcd 설치  →  ${NEW_HOST}"
-    scp ${SCP_OPTS} "${ETCD_TARBALL}" "${NEW_HOST}:/tmp/etcd.tar.gz" >> "${HA_LOG}" 2>&1
+    _RT=$(fn_remote_tmpdir "${NEW_HOST}")
+    scp ${SCP_OPTS} "${ETCD_TARBALL}" "${NEW_HOST}:${_RT}/etcd.tar.gz" >> "${HA_LOG}" 2>&1
     if [[ -f /etc/systemd/system/etcd.service ]]; then
         cp /etc/systemd/system/etcd.service "${WORK}/etcd.service"
     else
@@ -420,13 +436,13 @@ LimitNOFILE=65536
 WantedBy=multi-user.target
 ESVC
     fi
-    scp ${SCP_OPTS} "${WORK}/etcd.service" "${NEW_HOST}:/tmp/etcd.service" >> "${HA_LOG}" 2>&1
+    scp ${SCP_OPTS} "${WORK}/etcd.service" "${NEW_HOST}:${_RT}/etcd.service" >> "${HA_LOG}" 2>&1
     ssh ${SSH_OPTS} "${NEW_HOST}" bash >> "${HA_LOG}" 2>&1 <<RETCD
 set -e
 sudo systemctl stop etcd 2>/dev/null || true
 sudo rm -rf /var/lib/etcd
 sudo mkdir -p /opt/etcd /etc/etcd /var/lib/etcd
-sudo tar -zxf /tmp/etcd.tar.gz -C /opt/etcd --strip-components=1
+sudo tar -zxf ${_RT}/etcd.tar.gz -C /opt/etcd --strip-components=1
 sudo ln -sf /opt/etcd/etcd /usr/local/bin/etcd
 sudo ln -sf /opt/etcd/etcdctl /usr/local/bin/etcdctl
 sudo tee /etc/etcd/etcd.conf >/dev/null <<ECONF
@@ -440,10 +456,10 @@ initial-cluster: ${NEW_NAME}-etcd=http://${NEW_IP}:2380
 initial-cluster-token: ${DR_SCOPE}-etcd
 initial-cluster-state: new
 ECONF
-sudo mv /tmp/etcd.service /etc/systemd/system/etcd.service
+sudo install -m 644 -o root -g root ${_RT}/etcd.service /etc/systemd/system/etcd.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now etcd
-rm -f /tmp/etcd.tar.gz
+rm -rf ${_RT}
 RETCD
     sleep 3
     if ssh ${SSH_OPTS} "${NEW_HOST}" "etcdctl --endpoints=http://${NEW_IP}:2379 endpoint health" >> "${HA_LOG}" 2>&1; then
@@ -504,7 +520,7 @@ if [[ "${ADD_MODE}" == "a" && -n "${_pgbr_stanza}" && -f "${PGBR_CONF}" ]] \
     mkdir -p ~/.ssh && touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys
     [[ -n "${_key}" ]] && { grep -qxF "${_key}" ~/.ssh/authorized_keys || echo "${_key}" >> ~/.ssh/authorized_keys; }
     if [[ -n "${_repo_host}" ]] && ssh ${SSH_OPTS} "${NEW_HOST}" \
-        "ssh -o BatchMode=yes -o StrictHostKeyChecking=no -p ${HA_SSH_PORT} ${_u}@${_repo_host} true" >> "${HA_LOG}" 2>&1; then
+        "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -p ${HA_SSH_PORT} ${_u}@${_repo_host} true" >> "${HA_LOG}" 2>&1; then
         info "${NEW_HOST} → ${_repo_host} SSH 확인 (archive-push 경로)"
     else
         warn "${NEW_HOST} → 저장소(${_repo_host:-?}) SSH 실패 — ${NEW_HOST} 에서 ssh-copy-id ${_u}@${_repo_host:-<etcd>}"

@@ -19,6 +19,59 @@ phase() { local _txt="$*"
           echo -e "${CYAN}${BOLD}  ${_line}${NC}"; }
 div()   { echo -e "  ─────────────────────────────────────────────"; }
 
+# 설치 중 생성 파일용 개인 임시 디렉토리 (고정 /tmp 파일명 대신 — 다른 계정의 선점/심볼릭 링크 방지)
+PGPROJ_TMP="${PGPROJ_TMP:-$(mktemp -d /tmp/pgproj_install.XXXXXX)}"
+chmod 700 "${PGPROJ_TMP}" 2>/dev/null || true
+
+# ============================================================
+#  패스워드 / .pgpass  (pg_hba 는 trust 없이 scram-sha-256 만 사용)
+# ============================================================
+# 패스워드는 셸 heredoc · patroni.yml(YAML) · .pgpass(: 구분) 를 모두 통과해야 하므로
+# $ ` ' " \ : 공백 은 허용하지 않는다.
+PW_ALLOWED_RE='^[A-Za-z0-9._@%+=^~!#*-]{8,}$'
+
+fn_gen_password() {   # 영숫자 24자
+    local _p=""
+    if command -v openssl &>/dev/null; then
+        _p=$(openssl rand -base64 48 2>/dev/null | tr -dc 'A-Za-z0-9' | head -c 24)
+    fi
+    [[ ${#_p} -ge 24 ]] || _p=$(LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 24)
+    echo "${_p}"
+}
+
+fn_check_password() { # $1=라벨 $2=값
+    [[ "$2" =~ ${PW_ALLOWED_RE} ]] || error "$1 패스워드 형식 오류: 8자 이상, 영문/숫자와 . _ @ % + = ^ ~ ! # * - 만 사용
+    (\$ \` ' \" \\ : 공백은 셸/YAML/.pgpass 에서 깨지므로 불가)"
+}
+
+# .pgpass 줄 출력:  fn_pgpass_lines user1 pass1 [user2 pass2 ...]
+fn_pgpass_lines() {
+    while [[ $# -ge 2 ]]; do
+        [[ -n "$1" && -n "$2" ]] && printf '*:*:*:%s:%s\n' "$1" "$2"
+        shift 2
+    done
+}
+
+# 받은 줄(base64, $1)을 ~/.pgpass 에 병합 — 같은 유저 줄은 교체, 권한 0600
+FN_PGPASS_MERGE='umask 077; f="$HOME/.pgpass"; touch "$f"; new=$(printf "%s" "$1" | base64 -d);
+users=$(printf "%s\n" "$new" | cut -d: -f4 | paste -sd"|" -); t=$(mktemp);
+grep -v -E "^\*:\*:\*:(${users}):" "$f" > "$t" || true; printf "%s\n" "$new" >> "$t";
+mv "$t" "$f"; chmod 600 "$f"'
+
+fn_pgpass_local() {   # fn_pgpass_local user1 pass1 [...]
+    local _b64; _b64=$(fn_pgpass_lines "$@" | base64 -w0)
+    [[ -n "${_b64}" ]] || return 0
+    bash -c "${FN_PGPASS_MERGE}" _ "${_b64}"
+}
+
+fn_pgpass_remote() {  # fn_pgpass_remote host user1 pass1 [...]   (SSH_OPTS 사용)
+    local _h="$1"; shift
+    local _b64; _b64=$(fn_pgpass_lines "$@" | base64 -w0)
+    [[ -n "${_b64}" ]] || return 0
+    # shellcheck disable=SC2086
+    ssh ${SSH_OPTS} "${_h}" "bash -c $(printf '%q' "${FN_PGPASS_MERGE}") _ ${_b64}"
+}
+
 # ============================================================
 #  공통 함수 모음
 # ============================================================
@@ -61,6 +114,7 @@ fn_gen_conf() {
 # ── 접속 설정 ──────────────────────────────────────────────
 listen_addresses = '*'
 port             = ${PG_PORT}
+password_encryption = scram-sha-256    # pg_hba 는 trust 없이 scram-sha-256
 max_connections  = ${MAX_CONN}
 
 # ── 메모리 설정 ────────────────────────────────────────────

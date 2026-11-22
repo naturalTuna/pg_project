@@ -41,7 +41,7 @@ fn_deploy_backup() {
     fi
 
     # ── pg_basebackup.sh (Primary용) ─────────────────────────
-    cat > /tmp/pg_basebackup_pri.sh.tmp <<BKEOF
+    cat > "${PGPROJ_TMP}"/pg_basebackup_pri.sh.tmp <<BKEOF
 #!/bin/bash
 # pg_basebackup.sh — PostgreSQL 물리 백업 실행 스크립트
 # 생성일: $(date '+%Y-%m-%d %H:%M:%S')
@@ -90,7 +90,7 @@ WAL_CLEANUP="\${ENGINE_PATH}/etc/backup/wal_cleanup.sh"
 BKEOF
 
     # ── pg_basebackup.sh (Standby용) ─────────────────────────
-    cat > /tmp/pg_basebackup_sby.sh.tmp <<BKEOF
+    cat > "${PGPROJ_TMP}"/pg_basebackup_sby.sh.tmp <<BKEOF
 #!/bin/bash
 # pg_basebackup.sh — PostgreSQL 물리 백업 실행 스크립트
 # 생성일: $(date '+%Y-%m-%d %H:%M:%S')
@@ -139,7 +139,7 @@ WAL_CLEANUP="\${ENGINE_PATH}/etc/backup/wal_cleanup.sh"
 BKEOF
 
     # ── backup_setup.sh (공통) ───────────────────────────────
-    cat > /tmp/backup_setup.sh.tmp <<'SETUPEOF'
+    cat > "${PGPROJ_TMP}"/backup_setup.sh.tmp <<'SETUPEOF'
 #!/bin/bash
 # backup_setup.sh — PostgreSQL 백업 설정 변경 스크립트
 # 실행: bash /경로/backup_setup.sh
@@ -260,11 +260,11 @@ SETUPEOF
     if [[ "${INSTALL_MODE}" == "single" ]]; then
         mkdir -p "${BKUP_DIR}"
         # single은 primary/standby 구분 없으므로 pri 스크립트 사용
-        cp /tmp/pg_basebackup_pri.sh.tmp  "${BKUP_SCRIPT}"
-        cp /tmp/backup_setup.sh.tmp       "${SETUP_SCRIPT}"
+        cp "${PGPROJ_TMP}"/pg_basebackup_pri.sh.tmp  "${BKUP_SCRIPT}"
+        cp "${PGPROJ_TMP}"/backup_setup.sh.tmp       "${SETUP_SCRIPT}"
         chmod 750 "${BKUP_SCRIPT}" "${SETUP_SCRIPT}"
-        rm -f /tmp/pg_basebackup_pri.sh.tmp /tmp/pg_basebackup_sby.sh.tmp \
-              /tmp/backup_setup.sh.tmp
+        rm -f "${PGPROJ_TMP}"/pg_basebackup_pri.sh.tmp "${PGPROJ_TMP}"/pg_basebackup_sby.sh.tmp \
+              "${PGPROJ_TMP}"/backup_setup.sh.tmp
 
         # 크론탭 등록 (backup=y 일 때만)
         if [[ -n "${_BACK_PATH}" ]]; then
@@ -302,9 +302,9 @@ LOGEOF
         # ── Primary 배포 ──────────────────────────────────────
         ssh ${SSH_OPTS} "${HA_PRIMARY_HOST}" "mkdir -p '${BKUP_DIR}'" \
             >> "${HA_LOG}" 2>&1
-        scp ${SCP_OPTS} /tmp/pg_basebackup_pri.sh.tmp \
+        scp ${SCP_OPTS} "${PGPROJ_TMP}"/pg_basebackup_pri.sh.tmp \
             "${HA_PRIMARY_HOST}:${BKUP_SCRIPT}" >> "${HA_LOG}" 2>&1
-        scp ${SCP_OPTS} /tmp/backup_setup.sh.tmp \
+        scp ${SCP_OPTS} "${PGPROJ_TMP}"/backup_setup.sh.tmp \
             "${HA_PRIMARY_HOST}:${SETUP_SCRIPT}" >> "${HA_LOG}" 2>&1
         ssh ${SSH_OPTS} "${HA_PRIMARY_HOST}" \
             "chmod 750 '${BKUP_SCRIPT}' '${SETUP_SCRIPT}'" >> "${HA_LOG}" 2>&1
@@ -325,9 +325,9 @@ RCRON_PRI
         # ── Standby 배포 ──────────────────────────────────────
         ssh ${SSH_OPTS} "${HA_STANDBY_HOST}" "mkdir -p '${BKUP_DIR}'" \
             >> "${HA_LOG}" 2>&1
-        scp ${SCP_OPTS} /tmp/pg_basebackup_sby.sh.tmp \
+        scp ${SCP_OPTS} "${PGPROJ_TMP}"/pg_basebackup_sby.sh.tmp \
             "${HA_STANDBY_HOST}:${BKUP_SCRIPT}" >> "${HA_LOG}" 2>&1
-        scp ${SCP_OPTS} /tmp/backup_setup.sh.tmp \
+        scp ${SCP_OPTS} "${PGPROJ_TMP}"/backup_setup.sh.tmp \
             "${HA_STANDBY_HOST}:${SETUP_SCRIPT}" >> "${HA_LOG}" 2>&1
         ssh ${SSH_OPTS} "${HA_STANDBY_HOST}" \
             "chmod 750 '${BKUP_SCRIPT}' '${SETUP_SCRIPT}'" >> "${HA_LOG}" 2>&1
@@ -345,8 +345,8 @@ RCRON_SBY
             info "[Standby] 크론탭 등록 생략 (백업 서버: ${BACKUP_HOST_LABEL:-미지정})"
         fi
 
-        rm -f /tmp/pg_basebackup_pri.sh.tmp /tmp/pg_basebackup_sby.sh.tmp \
-              /tmp/backup_setup.sh.tmp
+        rm -f "${PGPROJ_TMP}"/pg_basebackup_pri.sh.tmp "${PGPROJ_TMP}"/pg_basebackup_sby.sh.tmp \
+              "${PGPROJ_TMP}"/backup_setup.sh.tmp
 
         # 설정 로그 (backup=y 서버에만)
         if [[ -n "${_BACK_PATH}" && -n "${BACKUP_HOST}" ]]; then
@@ -459,7 +459,7 @@ fi
 _after=$(find "${ARC_PATH}" -maxdepth 1 -type f | wc -l)
 log "완료: 파일 ${_before} → ${_after}개 (정리 전 ${_size_before})"
 WALBODY
-    } > /tmp/wal_cleanup.sh.tmp
+    } > "${PGPROJ_TMP}"/wal_cleanup.sh.tmp
     { echo '#!/bin/bash'; echo '# pitr_restore.sh — 백업 + 아카이브 WAL 로 복구 (single)'; echo "${_conf}"; cat <<'PITRBODY'
 # ── 이하 본문 (설정은 위 변수) ───────────────────────────────
 #  사용법
@@ -582,13 +582,13 @@ _last=$("${ENGINE_PATH}/bin/psql" -p "${PG_PORT}" -d postgres -Atc "SELECT pg_la
 info "복구 완료 — 마지막 적용 트랜잭션: ${_last:-알 수 없음}"
 info "이전 DATA 는 확인 후 직접 삭제하세요: ${DATA_PATH}.before_restore_${_ts}"
 PITRBODY
-    } > /tmp/pitr_restore.sh.tmp
+    } > "${PGPROJ_TMP}"/pitr_restore.sh.tmp
 
     local _cron_line="${WAL_CRON} bash ${WAL_SCRIPT} >> ${LOG_PATH}/cron_wal_cleanup.log 2>&1"
     if [[ "${INSTALL_MODE}" == "single" ]]; then
         mkdir -p "${TOOL_DIR}"
-        cp /tmp/wal_cleanup.sh.tmp  "${WAL_SCRIPT}"
-        cp /tmp/pitr_restore.sh.tmp "${PITR_SCRIPT}"
+        cp "${PGPROJ_TMP}"/wal_cleanup.sh.tmp  "${WAL_SCRIPT}"
+        cp "${PGPROJ_TMP}"/pitr_restore.sh.tmp "${PITR_SCRIPT}"
         chmod 750 "${WAL_SCRIPT}" "${PITR_SCRIPT}"
         if [[ -n "${ARC_PATH}" ]]; then
             ( crontab -l 2>/dev/null | grep -vF "${WAL_SCRIPT}" || true; echo "${_cron_line}" ) | crontab -
@@ -599,8 +599,8 @@ PITRBODY
         local _h
         for _h in "${HA_PRIMARY_HOST}" "${HA_STANDBY_HOST}"; do
             ssh ${SSH_OPTS} "${_h}" "mkdir -p '${TOOL_DIR}'" >> "${HA_LOG}" 2>&1
-            scp ${SCP_OPTS} /tmp/wal_cleanup.sh.tmp  "${_h}:${WAL_SCRIPT}"  >> "${HA_LOG}" 2>&1
-            scp ${SCP_OPTS} /tmp/pitr_restore.sh.tmp "${_h}:${PITR_SCRIPT}" >> "${HA_LOG}" 2>&1
+            scp ${SCP_OPTS} "${PGPROJ_TMP}"/wal_cleanup.sh.tmp  "${_h}:${WAL_SCRIPT}"  >> "${HA_LOG}" 2>&1
+            scp ${SCP_OPTS} "${PGPROJ_TMP}"/pitr_restore.sh.tmp "${_h}:${PITR_SCRIPT}" >> "${HA_LOG}" 2>&1
             ssh ${SSH_OPTS} "${_h}" "chmod 750 '${WAL_SCRIPT}' '${PITR_SCRIPT}'" >> "${HA_LOG}" 2>&1
             if [[ -n "${ARC_PATH}" ]]; then
                 ssh ${SSH_OPTS} "${_h}" bash >> "${HA_LOG}" 2>&1 <<RWCRON
@@ -610,5 +610,5 @@ RWCRON
             info "[${_h}] WAL 정리 / 복구 스크립트 배포 완료 → ${TOOL_DIR}/"
         done
     fi
-    rm -f /tmp/wal_cleanup.sh.tmp /tmp/pitr_restore.sh.tmp
+    rm -f "${PGPROJ_TMP}"/wal_cleanup.sh.tmp "${PGPROJ_TMP}"/pitr_restore.sh.tmp
 }
