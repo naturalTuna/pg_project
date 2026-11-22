@@ -1,4 +1,5 @@
 #!/bin/bash
+# shellcheck disable=SC2088  # 안내 문구 안의 ~ 는 사용자에게 보여주는 경로 표기
 # ============================================================
 #  tools/hba_trust_to_scram.sh — 이미 설치된 노드의 pg_hba.conf trust → scram-sha-256 전환
 #

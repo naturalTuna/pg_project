@@ -1,4 +1,5 @@
 #!/bin/bash
+# shellcheck disable=SC2034,SC2088  # 설치 lib 가 읽는 입력 변수를 테스트에서 채움 / 안내 문구의 ~
 # pg_download.sh 무결성 함수 + 설치 시작 시 SHA256SUMS 검증 테스트 (네트워크 불필요)
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"

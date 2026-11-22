@@ -270,6 +270,8 @@ RRC
 info ".postgresrc 설정 완료"
 
 # ~/.pgpass (pg_hba 는 scram-sha-256 만 → 운영/백업 스크립트가 쓰는 패스워드 파일도 같이)
+#   (아래 ~ 는 원격 셸에서 펼쳐져야 하므로 따옴표 안에 그대로 둔다)
+# shellcheck disable=SC2088
 if ssh ${SSH_OPTS} "${SRC_HOST}" "test -s ~/.pgpass" 2>/dev/null; then
     ssh ${SSH_OPTS} "${SRC_HOST}" "cat ~/.pgpass" 2>/dev/null \
       | ssh ${SSH_OPTS} "${NEW_HOST}" "umask 077; cat > ~/.pgpass; chmod 600 ~/.pgpass" 2>>"${HA_LOG}" \

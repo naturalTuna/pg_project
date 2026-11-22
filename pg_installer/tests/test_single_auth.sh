@@ -1,4 +1,5 @@
 #!/bin/bash
+# shellcheck disable=SC2034,SC2088  # 설치 lib 가 읽는 입력 변수를 테스트에서 채움 / 안내 문구의 ~
 # single 모드 인증 테스트 (빌드 단계는 stub, initdb → pg_hba → 기동 → 복제유저 → 접속 검증은 실제 수행)
 #   사용: PG_BIN=/usr/lib/postgresql/16/bin bash tests/test_single_auth.sh   (root 가 아닌 계정)
 set -uo pipefail

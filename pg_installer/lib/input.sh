@@ -491,14 +491,14 @@ fi
 #    superuser / 복제 유저 / Patroni REST API 패스워드를 정하고,
 #    설치 계정의 ~/.pgpass (0600) 에 저장해서 백업·운영 스크립트가 그대로 동작하게 한다.
 # ============================================================
-SU_PASS="" ; REPL_PASS="" ; SU_PASS_GEN=n
+SU_PASS="" ; REPL_PASS=""
 SU_NAME="postgres"     # superuser 이름 고정 (single: initdb -U postgres / ha: Patroni) — .postgresrc 의 PGUSER 와 일치
 echo ""
 echo -e "  ${BOLD}┌─ DB 계정 패스워드 (scram-sha-256, trust 미사용) ───┐${NC}"
 echo -e "  ${BOLD}└────────────────────────────────────────────────────┘${NC}"
 read -rsp "  superuser(${SU_NAME}) 패스워드 (비우면 자동 생성): " SU_PASS; echo ""
 if [[ -z "${SU_PASS}" ]]; then
-    SU_PASS=$(fn_gen_password); SU_PASS_GEN=y; echo "  → 자동 생성 (~/.pgpass 에 저장)"
+    SU_PASS=$(fn_gen_password); echo "  → 자동 생성 (~/.pgpass 에 저장)"
 else
     fn_check_password "superuser" "${SU_PASS}"
 fi
@@ -511,7 +511,9 @@ if [[ "${INSTALL_MODE}" == "single" && -n "${REPL_USER}" ]]; then
     fi
 fi
 # Patroni REST API 인증 (쓰기 API: switchover/restart/config 변경 등) — 자동 생성
+# shellcheck disable=SC2034  # lib/patroni_common.sh (fn_gen_patroni_yml) 에서 사용
 PATRONI_API_USER="patroni"
+# shellcheck disable=SC2034
 PATRONI_API_PASS=$(fn_gen_password)
 
 # ── single 모드 기본 포트 설정 ────────────────────────────────

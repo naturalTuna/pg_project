@@ -89,6 +89,22 @@
           /usr/bin/systemctl status patroni, /usr/sbin/ip, /usr/sbin/arping
     patronictl 은 sudo 불필요. 노드 추가 / 재설치 때는 다시 넓혀야 함
 
+ 2-2. 인증 (scram-sha-256) / 예전 설치본 전환
+    지금 설치본: pg_hba 에 trust 없음. psql / 백업 스크립트는 ~/.pgpass 로 접속
+      cat ~/.pgpass                             *:*:*:postgres:... / *:*:*:replicator:...
+      psql -c "select current_user"             비밀번호를 물으면 ~/.pgpass 권한(0600) / 내용 확인
+    Patroni REST 쓰기 API 는 인증 필요
+      patronictl -c $PYML switchover ...        patroni.yml 의 restapi.authentication 을 자동 사용
+      curl -u <user>:<pass> -XPATCH http://<노드>:8008/config -d '{...}'   (user/pass 는 patroni.yml)
+      GET (/primary, /replica, /health) 은 인증 없이 그대로 (VIP 스크립트 / 모니터링)
+    예전 버전으로 설치한 노드 (pg_hba 에 trust / /24 trust, superuser 비번 'postgres')
+      bash tools/hba_trust_to_scram.sh                  점검만 (아무것도 안 바꿈)
+        -> 계정별 비밀번호 상태(없음 / md5 / SCRAM), ~/.pgpass, patroni.yml 기본 비번, REST 인증 여부
+      WARN 항목 조치 후
+      bash tools/hba_trust_to_scram.sh --apply          pg_hba.conf 백업 -> trust 를 scram 으로 -> 문법검증 -> reload
+                                                        -> ~/.pgpass 로 재접속 확인 (실패 시 원복 명령 출력)
+      HA 는 노드마다 실행. superuser 비번을 바꿀 땐 patroni.yml(모든 노드) + patronictl reload 같이
+
 
 ================================================================================
  3. Patroni 운영 (HA)

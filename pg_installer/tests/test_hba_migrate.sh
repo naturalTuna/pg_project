@@ -1,4 +1,5 @@
 #!/bin/bash
+# shellcheck disable=SC2034,SC2088  # 설치 lib 가 읽는 입력 변수를 테스트에서 채움 / 안내 문구의 ~
 # tools/hba_trust_to_scram.sh 테스트 — 예전 설치본처럼 trust 클러스터를 만들고 점검 → 거부 → 조치 → 적용
 #   사용 (root 아닌 계정): PG_BIN=/usr/lib/postgresql/16/bin bash tests/test_hba_migrate.sh
 set -uo pipefail

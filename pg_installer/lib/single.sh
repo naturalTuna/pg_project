@@ -34,7 +34,7 @@
 
     # ~/.pgpass (0600) — 이후 psql / 백업 스크립트가 trust 없이 접속
     fn_pgpass_local "${REPL_USER:-}" "${REPL_PASS:-}" "${SU_NAME}" "${SU_PASS}"
-    info "~/.pgpass 에 DB 계정 패스워드 저장 (0600)"
+    info "${HOME_DIR:-$HOME}/.pgpass 에 DB 계정 패스워드 저장 (0600)"
 
     # initdb — trust 없이 scram-sha-256 (로컬 소켓 포함), superuser 패스워드 지정
     info "initdb 실행 중 (locale: ${PG_LOCALE}, 인증: scram-sha-256)..."

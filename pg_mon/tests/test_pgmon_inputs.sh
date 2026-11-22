@@ -1,4 +1,5 @@
 #!/bin/bash
+# shellcheck disable=SC2034,SC2088  # 설치 lib 가 읽는 입력 변수를 테스트에서 채움 / 안내 문구의 ~
 # pgmon 입력값 처리 테스트 — lib/*.sh 의 SQL 을 그대로 꺼내 실제 PG 에 실행
 #   사용: PGHOST=... PGPORT=... PGUSER=<superuser> bash pg_mon/tests/test_pgmon_inputs.sh
 set -uo pipefail

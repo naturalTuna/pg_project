@@ -1,4 +1,5 @@
 #!/bin/bash
+# shellcheck disable=SC2034,SC2088  # 설치 lib 가 읽는 입력 변수를 테스트에서 채움 / 안내 문구의 ~
 # HA 인증 통합 테스트 — 설치 스크립트가 만드는 patroni.yml 그대로 etcd + Patroni 2노드를 한 서버(127.0.0.2/.3)에 띄움
 #   사용 (root 가 아닌 계정): PG_BIN=/usr/lib/postgresql/16/bin ETCD_BIN=/path/etcd bash tests/test_ha_patroni.sh
 #   필요: patroni(etcd3), psycopg2, curl, python3-yaml
