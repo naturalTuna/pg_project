@@ -33,6 +33,8 @@ import hint_verifier
 import stats_check
 import index_check
 import tunelog
+import pgexec
+from pg_tune_ai import orchestrator
 
 
 # ---------------------------------------------------------------------------
@@ -176,14 +178,60 @@ def cmd_stats(a) -> int:
 
 
 def cmd_index_check(a) -> int:
-    issues = index_check.diagnose(a.dsn, a.min_scans)
+    issues = index_check.diagnose(a.dsn, a.min_scans, a.exact_bloat)
     print(json.dumps([asdict(i) for i in issues], ensure_ascii=False, indent=2) if a.format == "json"
           else index_check.format_report(issues))
     return 0
 
 
+# ---------------------------------------------------------------------------
+# ai : 진단 → 로컬 LLM(Ollama) 제안 → 검증 (선택 기능)
+# ---------------------------------------------------------------------------
+def cmd_ai(args) -> int:
+    log = not getattr(args, "no_log", False)
+    result = orchestrator.run(
+        args.dsn, args.sql,
+        model=args.model, host=args.host,
+        analyze=args.analyze,
+        verify=not args.no_verify,
+        timeout=args.timeout,
+    )
+    report = orchestrator.format_report(result)
+
+    if args.format == "json":
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    else:
+        print(report)
+
+    # 항상 로그(ai). 순서: 진단+LLM 제안+검증 리포트 → 프롬프트 EXPLAIN → 제안별 before/after
+    if log:
+        parts = [report]
+        if result.get("plan_text"):
+            parts += ["", "=== 프롬프트에 사용된 EXPLAIN (원본 플랜) ===", result["plan_text"]]
+        # 검증된 제안별 적용 전/후 EXPLAIN
+        ver = result.get("verified", [])
+        blocks = []
+        for i, v in enumerate(ver, 1):
+            eb, ea = v.get("explain_before", ""), v.get("explain_after", "")
+            if not eb and not ea:
+                continue
+            b = [f"--- 제안 {i} [{v.get('type')}] {v.get('detail','')} ---"]
+            if eb:
+                b += ["[before]", eb]
+            if ea:
+                b += ["[after]", ea]
+            blocks.append("\n".join(b))
+        if blocks:
+            parts += ["", "=== 제안별 적용 전/후 EXPLAIN ===", ""]
+            parts.append("\n\n".join(blocks))
+        tunelog.write("ai", args.sql, "\n".join(parts), dsn=args.dsn, sql=args.sql)
+    return 0
+
+
 def build_parser():
     p = argparse.ArgumentParser(prog="pgtune", description="규칙 기반 PostgreSQL 쿼리 튜닝")
+    p.add_argument("--statement-timeout", help="모든 쿼리 statement_timeout (기본 5min, 예: 30s)")
+    p.add_argument("--lock-timeout", help="lock_timeout (기본 5s)")
     sub = p.add_subparsers(dest="command", required=True)
 
     def common(sp, need_sql=True, need_dsn=True):
@@ -224,13 +272,25 @@ def build_parser():
 
     c = sub.add_parser("index-check", help="DB 전체 인덱스 점검")
     common(c, need_sql=False); c.add_argument("--min-scans", type=int, default=50)
+    c.add_argument("--exact-bloat", action="store_true", help="pgstatindex 로 블로트 실측 (인덱스 전체 읽음)")
     c.set_defaults(func=cmd_index_check)
-    # 예전 pg_tune_ai 호출 호환 (--no-analyze 기본)
+    ai = sub.add_parser("ai", help="진단 + 로컬 LLM(Ollama) 제안 + 검증 (선택 기능)")
+    ai.add_argument("--dsn", required=True)
+    ai.add_argument("--sql", required=True)
+    ai.add_argument("--model", default=orchestrator.llm_client.DEFAULT_MODEL)
+    ai.add_argument("--host", default=orchestrator.llm_client.DEFAULT_HOST)
+    ai.add_argument("--no-verify", action="store_true", help="LLM 제안을 검증 없이 출력 (권장 안 함)")
+    ai.add_argument("--timeout", type=int, default=180, help="LLM 응답 대기 초")
+    ai.add_argument("--format", choices=["text", "json"], default="text")
+    ai.add_argument("--no-log", action="store_true")
+    analyze_opt(ai)
+    ai.set_defaults(func=cmd_ai)
     return p
 
 
 def main() -> int:
     args = build_parser().parse_args()
+    pgexec.set_timeouts(args.statement_timeout, args.lock_timeout)
     try:
         return args.func(args)
     except Exception as e:
