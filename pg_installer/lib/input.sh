@@ -97,6 +97,17 @@ echo ""
 # ============================================================
 #  installer/ 디렉토리 및 패키지 확인
 # ============================================================
+# 반입 패키지 무결성: pg_download.sh 가 만든 SHA256SUMS 와 대조 (없는 파일은 건너뜀, 바뀐 파일이 있으면 중단)
+if [[ -f "${SCRIPT_DIR}/SHA256SUMS" ]]; then
+    if _sumerr=$(cd "${SCRIPT_DIR}" && sha256sum --check --quiet --ignore-missing SHA256SUMS 2>&1); then
+        echo -e "  ${GREEN}✔${NC}  패키지 무결성 확인 (SHA256SUMS)"
+    else
+        echo "${_sumerr}" | head -10
+        error "패키지 파일이 SHA256SUMS 와 다릅니다 (반입 중 손상 / 변조 의심). 다시 반입하세요."
+    fi
+else
+    echo -e "  ${YELLOW}⚠${NC}  SHA256SUMS 없음 — 패키지 무결성 검증 생략 (pg_download.sh 로 다시 만들면 생성됨)"
+fi
 [[ ! -d "${INSTALLER_DIR}" ]] && \
     error "installer/ 디렉토리를 찾을 수 없습니다: ${INSTALLER_DIR}"
 
