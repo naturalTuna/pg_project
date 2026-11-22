@@ -128,10 +128,19 @@ ORDER BY age(c.relfrozenxid) DESC LIMIT 20")
                 local tname
                 read -r tname
                 if [[ -n "$tname" ]]; then
-                    printf "  ${C_DIM}VACUUM ANALYZE %s 실행 중...${C_RESET}\n" "$tname"
+                    # 입력값을 SQL 에 직접 넣지 않음: to_regclass 로 실제 테이블인지 확인 후 format(%s, regclass) 로 실행
+                    local qname
+                    qname=$(PGPASSWORD="$pass" psql -h "$host" -p "$port" -U "$user" -d "$dbname" -XAtq \
+                        -v t="$tname" 2>/dev/null <<< "SELECT to_regclass(:'t')::text")
+                    if [[ -z "$qname" ]]; then
+                        printf "  ${C_BRED}✘ 테이블을 찾을 수 없음: %s${C_RESET}\n" "$tname"; sleep 2; continue
+                    fi
+                    printf "  ${C_DIM}VACUUM ANALYZE %s 실행 중...${C_RESET}\n" "$qname"
                     if PGPASSWORD="$pass" psql -h "$host" -p "$port" \
-                            -U "$user" -d "$dbname" \
-                            -c "VACUUM ANALYZE ${tname}" -q 2>&1; then
+                            -U "$user" -d "$dbname" -X -v t="$tname" -q 2>&1 <<'VSQL'
+SELECT format('VACUUM ANALYZE %s', to_regclass(:'t')) \gexec
+VSQL
+                    then
                         printf "  ${C_BGREEN}✔ 완료${C_RESET}\n"
                     else
                         printf "  ${C_BRED}✘ 실패 (테이블명 또는 권한 확인)${C_RESET}\n"

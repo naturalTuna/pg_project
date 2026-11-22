@@ -183,12 +183,35 @@ postgresql/
 
 ---
 
-## 보안 기본값 — 운영 전 반드시 변경
+## 보안 기본값
 
-- single: initdb 기본이라 **로컬 접속 trust** → postgres 패스워드 설정, `pg_hba.conf` 조정
-- HA: `patroni.yml` superuser 패스워드 `postgres`, 노드 IP 기준 **/24 trust** → 변경 / 범위 축소
+| 항목 | 지금 설치본 |
+|---|---|
+| pg_hba | 전부 **scram-sha-256** (trust 없음). 복제 허용은 노드 IP `/32` 만 |
+| superuser / 복제 유저 비밀번호 | 설치 때 입력, 비우면 24자 자동 생성 → 설치 계정 `~/.pgpass` (0600). HA 는 각 노드에 배포 |
+| Patroni REST API | 쓰기 API(switchover / restart / config) **인증 필요** (자동 생성). GET 헬스체크는 그대로 |
+| patroni.yml | 로컬에서 생성해 0600 으로 전송 (비밀번호가 원격 셸에서 해석되지 않음) |
+| ssh | `StrictHostKeyChecking=accept-new` (처음 본 호스트만 등록, 키가 바뀌면 중단) |
+| 반입 패키지 | PG 소스 / etcd 는 업스트림 sha256 대조, 전체 `SHA256SUMS` 를 설치 시작 시 검증 |
+| 임시 파일 | 고정 `/tmp` 파일명 없음 (개인 임시 디렉토리 / 원격 `mktemp -d`) |
+
+운영 전 남은 것
 - pgmon role 패스워드 = role 이름 → 변경
-- 설치 계정 `sudo NOPASSWD: ALL` → 운영 중에는 축소 가능 ([운영가이드 2-1](docs/운영가이드.txt))
+- 설치 계정 `sudo NOPASSWD: ALL` → 운영 중에는 축소 ([운영가이드 2-1](docs/운영가이드.txt))
+- 방화벽: 8008 은 노드 / etcd 서버만, 2379·2380 은 etcd 노드끼리만 (etcd 자체 인증 / TLS 는 아직 미적용)
+- **예전 버전으로 설치한 노드**: `bash pg_installer/tools/hba_trust_to_scram.sh` (점검만) → 조치 후 `--apply`
+  ([운영가이드 2-2](docs/운영가이드.txt))
+
+## 테스트
+
+```bash
+# 실제 PG16 바이너리로 (root 가 아닌 계정)
+PG_BIN=/usr/lib/postgresql/16/bin bash pg_installer/tests/test_single_auth.sh     # single 설치 인증 흐름
+PG_BIN=... ETCD_BIN=/path/etcd bash pg_installer/tests/test_ha_patroni.sh          # etcd + Patroni 2노드 (생성된 patroni.yml 그대로)
+PG_BIN=... bash pg_installer/tests/test_hba_migrate.sh                             # 예전 설치본 trust → scram 전환
+bash pg_installer/tests/test_checksums.sh                                          # 무결성 검증 (네트워크 불필요)
+PGHOST=... PGUSER=postgres bash pg_mon/tests/test_pgmon_inputs.sh                  # pgmon 입력값 / webhook
+```
 
 ## 검증 상태
 
@@ -199,3 +222,4 @@ postgresql/
 | pgBackRest HA (etcd 서버 저장소), etcd 서버 single PG 보호 | 로컬 시뮬레이션 확인, **실서버 미검증** |
 | watchdog 리부트(T7), 전원 OFF, 전체 재부팅, HA PITR | 실서버 확인 필요 |
 | PG 마이너 업그레이드 | 자동화 안 됨 (운영가이드 11-2 수동 절차) |
+| scram 인증 / REST 인증 / .pgpass (이번 변경) | 로컬 테스트 (PG16 + Patroni 4.1 + etcd 3.5, 위 테스트 스크립트), **실서버 미검증** |

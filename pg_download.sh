@@ -126,6 +126,33 @@ if [[ -n "${LOCK_FILE}" ]]; then
     [[ -n "${LOCK[PG_VERSION]:-}" ]] || error "lock 파일에 PG_VERSION 이 없습니다: ${LOCK_FILE}"
 fi
 
+# ── 무결성 검증 ──────────────────────────────────────────────
+#   PostgreSQL 소스 / etcd : 배포처가 공개한 sha256 과 대조 (불일치면 중단)
+#   GitHub 태그 tarball(extension / pgBackRest) : 공식 체크섬이 없으므로 BUILD_LOCK.txt 에
+#     SHA256_* 로 기록하고, --lock 으로 다시 받을 때 같은지 대조 (태그가 바뀌었으면 중단)
+#   마지막에 패키지 전체 SHA256SUMS 생성 → 폐쇄망 설치 시작 때 postgresql_install.sh 가 검증
+#   업스트림 체크섬을 받을 수 없는 미러 환경이면: SKIP_UPSTREAM_SHA256=1 bash pg_download.sh
+fn_fetch_text() {   # URL 내용을 stdout 으로
+    if command -v curl &>/dev/null; then curl -fsSL --max-time 30 "$1"; else wget -qO- --timeout=30 "$1"; fi
+}
+fn_sha256() { sha256sum "$1" | awk '{print $1}'; }
+fn_verify_upstream_sha256() {   # $1=파일 $2=기대 해시(비면 실패) $3=설명
+    local _got _exp="$2"
+    if [[ -z "${_exp}" ]]; then
+        [[ "${SKIP_UPSTREAM_SHA256:-0}" == 1 ]] && { warn "$3: 업스트림 sha256 확인 생략 (SKIP_UPSTREAM_SHA256=1)"; return 0; }
+        error "$3: 업스트림 sha256 을 받지 못했습니다 (미러 환경이면 SKIP_UPSTREAM_SHA256=1)"
+    fi
+    _got=$(fn_sha256 "$1")
+    [[ "${_got}" == "${_exp}" ]] || { rm -f "$1"; error "$3: sha256 불일치 — 파일 삭제함 (기대 ${_exp} / 실제 ${_got})"; }
+    info "$3: sha256 확인 ✔"
+}
+fn_check_lock_sha256() {        # $1=키 $2=파일  (--lock 일 때 기록된 해시와 대조)
+    local _exp="${LOCK[$1]:-}"
+    [[ -n "${_exp}" ]] || return 0
+    [[ "$(fn_sha256 "$2")" == "${_exp}" ]] \
+        || error "$1: BUILD_LOCK 의 sha256 과 다름 — 같은 태그인데 내용이 바뀜 (태그 이동 / 변조 의심): $2"
+}
+
 # ── GitHub 태그 목록 (git 있으면 ls-remote, 없으면 API) ─────
 fn_list_tags() {
     local repo="$1"
@@ -348,6 +375,9 @@ else
     mv "${PG_DEST}.part" "${PG_DEST}"
     info "PostgreSQL 소스 다운로드 완료 → ${PG_DEST}"
 fi
+# 공식 sha256 (ftp.postgresql.org 의 <파일>.sha256) 과 대조 — 캐시된 파일도 매번 확인
+fn_verify_upstream_sha256 "${PG_DEST}" \
+    "$(fn_fetch_text "${PG_URL}.sha256" 2>/dev/null | awk '{print $1}' | head -1)" "PostgreSQL ${PG_VERSION} 소스"
 
 # ============================================================
 #  2. 빌드 기능 판단
@@ -540,6 +570,7 @@ fn_ext_download() {
     tar -tzf "${_dest}.part" &>/dev/null || { rm -f "${_dest}.part"; return 1; }
     find "${EXT_SRC_DIR}" -maxdepth 1 -name "${_n}-*.tar.gz" ! -name "${_n}-${_ref}.tar.gz" -delete
     mv "${_dest}.part" "${_dest}"
+    fn_check_lock_sha256 "SHA256_EXT_${_n}" "${_dest}"
 }
 
 if [[ -f "${EXT_CATALOG}" ]]; then
@@ -623,6 +654,7 @@ else
         if tar -tzf "${PGBR_DEST}.part" &>/dev/null; then
             find "${PGBR_DIR}" -maxdepth 1 -name 'pgbackrest-*.tar.gz' -delete
             mv "${PGBR_DEST}.part" "${PGBR_DEST}"
+            fn_check_lock_sha256 SHA256_PGBACKREST "${PGBR_DEST}"
             info "pgBackRest ${PGBR_VER} → ${PGBR_DEST}"
         else
             rm -f "${PGBR_DEST}.part"; PGBR_REF=""
@@ -837,6 +869,10 @@ if [[ "${INSTALL_MODE}" == "ha" ]]; then
         mv "${ETCD_DEST}.part" "${ETCD_DEST}"
         info "etcd 다운로드 완료 → ${ETCD_DEST}"
     fi
+    # 릴리스 SHA256SUMS 와 대조
+    fn_verify_upstream_sha256 "${ETCD_DEST}" \
+        "$(fn_fetch_text "https://github.com/etcd-io/etcd/releases/download/v${ETCD_VERSION}/SHA256SUMS" 2>/dev/null \
+           | awk -v f="${ETCD_TARBALL}" '$2 == f {print $1}' | head -1)" "etcd ${ETCD_VERSION}"
 
     # Patroni pip 패키지
     PATRONI_TMP="${INSTALLER_DIR}/patroni_pkgs"
@@ -982,6 +1018,14 @@ LOCK_OUT="${WORK_DIR}/BUILD_LOCK.txt"
         echo "EXT_${_n}=${EXT_FINAL[${_n}]}"
     done
     [[ -n "${PGBR_REF}" ]] && echo "PGBACKREST=${PGBR_REF}"
+    echo "# ── sha256 (--lock 재다운로드 시 같은지 대조: 태그 이동 / 변조 감지) ──"
+    for _f in "${EXT_SRC_DIR}"/*.tar.gz; do
+        [[ -f "${_f}" ]] || continue
+        for _n in "${!EXT_FINAL[@]}"; do
+            [[ "$(basename "${_f}")" == "${_n}-${EXT_FINAL[${_n}]}.tar.gz" ]] && echo "SHA256_EXT_${_n}=$(fn_sha256 "${_f}")"
+        done
+    done
+    [[ -n "${PGBR_REF}" && -f "${PGBR_DEST:-}" ]] && echo "SHA256_PGBACKREST=$(fn_sha256 "${PGBR_DEST}")"
     echo "VERIFY=${VERIFY_RESULT}"
     echo "# ── 받은 rpm (기록용 — --lock 재다운로드 시 rpm 은 저장소의 현재 버전을 받음) ──"
     for _f in "${WORK_DIR}"/PKG/*.rpm; do
@@ -989,6 +1033,13 @@ LOCK_OUT="${WORK_DIR}/BUILD_LOCK.txt"
     done
 } > "${LOCK_OUT}"
 info "구성 기록 → ${LOCK_OUT}"
+
+# ── 패키지 전체 체크섬 (폐쇄망 반입 후 postgresql_install.sh 가 시작할 때 검증) ──
+#   설치 중 다시 만드는 묶음(PKG.tar.gz / patroni_pkgs.tar.gz)과 실행 산출물은 제외
+( cd "${WORK_DIR}" && find . -type f ! -name SHA256SUMS ! -path './installer/PKG.tar.gz' \
+      ! -path './installer/patroni_pkgs.tar.gz' ! -name '*.log' ! -path './monitoring/pgmon/conf/*' \
+      -print0 | sort -z | xargs -0 sha256sum ) > "${WORK_DIR}/SHA256SUMS"
+info "패키지 체크섬 → ${WORK_DIR}/SHA256SUMS ($(wc -l < "${WORK_DIR}/SHA256SUMS")개 파일)"
 
 # ============================================================
 #  최종 디렉토리 구조 출력

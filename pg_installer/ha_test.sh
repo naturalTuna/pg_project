@@ -68,7 +68,7 @@ fi
 NODES=("${NODE1}" "${NODE2}")
 VIP="${VIP:-}"
 
-SSHO=(-o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=no -p "${SSH_PORT}")
+SSHO=(-o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new -p "${SSH_PORT}")
 RPATH='export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH;'
 TS=$(date +%Y%m%d_%H%M%S)
 REPORT="${HOME}/ha_test_report_${TS}.txt"
@@ -103,9 +103,9 @@ other() { [[ "$1" == "${NODES[0]}" ]] && echo "${NODES[1]}" || echo "${NODES[0]}
 vip_on() { [[ -z "${VIP}" ]] && return 1; rsh "$1" "ip -o -4 addr show | grep -q 'inet ${VIP}/'" 2>/dev/null; }
 vip_holders() { local h o=(); for h in "${NODES[@]}"; do vip_on "$h" && o+=("$h"); done; echo "${o[*]}"; }
 # VIP 로 SQL (client 노드에서 psql -h VIP 실행)
-vsql() { rsh "$1" "PGCONNECT_TIMEOUT=3 ${PSQL} -h ${VIP:-$1} -p ${PG_PORT} -U postgres -d postgres -Atqc \"$2\"" 2>/dev/null; }
+vsql() { rsh "$1" "PGCONNECT_TIMEOUT=3 ${PSQL} -w -h ${VIP:-$1} -p ${PG_PORT} -U postgres -d postgres -Atqc \"$2\"" 2>/dev/null; }
 # 노드 로컬 SQL
-lsql() { rsh "$1" "PGCONNECT_TIMEOUT=3 ${PSQL} -p ${PG_PORT} -U postgres -d postgres -Atqc \"$2\"" 2>/dev/null; }
+lsql() { rsh "$1" "PGCONNECT_TIMEOUT=3 ${PSQL} -w -p ${PG_PORT} -U postgres -d postgres -Atqc \"$2\"" 2>/dev/null; }
 member_name() { # host → Patroni 멤버 이름
     rsh "$1" "patronictl -c ${PYML} list -f json" 2>/dev/null | python3 -c '
 import json,sys

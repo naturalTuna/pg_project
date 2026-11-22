@@ -330,7 +330,7 @@ fn_pgbr_ha_setup() {
         if [[ -n "${_key}" ]]; then
             grep -qxF "${_key}" ~/.ssh/authorized_keys || echo "${_key}" >> ~/.ssh/authorized_keys
         fi
-        if ssh ${SSH_OPTS} "${_h}" "ssh -o BatchMode=yes -o StrictHostKeyChecking=no -p ${HA_SSH_PORT} ${_u}@${HA_ETCD_HOST} true" >> "${HA_LOG}" 2>&1; then
+        if ssh ${SSH_OPTS} "${_h}" "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -p ${HA_SSH_PORT} ${_u}@${HA_ETCD_HOST} true" >> "${HA_LOG}" 2>&1; then
             info "[${_h}] → etcd 서버 SSH 접속 확인 (archive-push 경로)"
         else
             warn "[${_h}] → etcd 서버 SSH 접속 실패. ${_h} 에서: ssh-copy-id -p ${HA_SSH_PORT} ${_u}@${HA_ETCD_HOST}"

@@ -37,7 +37,7 @@ PG_PORT=5432
 #HA_FAILSAFE=y             # etcd 전체 장애 시에도 Primary 유지 (Patroni 3.0+)
 #HA_SYNC_MODE=n            # 동기 복제 (데이터 유실 0, 커밋 지연 증가)
 #REPL_USER_HA=replicator
-#REPL_PASS_HA="change_me"
+#REPL_PASS_HA=            # 비우면 자동 생성 (각 노드 ~/.pgpass 에 저장)
 #PRI_CPU=
 #PRI_MEM_GB=
 #SBY_CPU=
@@ -61,6 +61,12 @@ BACKUP_CRON_SEL=1          # 1=매일 02시  2=매주 일요일 02시  3=직접 
 #BACKUP_CRON="30 1 * * *"  # BACKUP_CRON_SEL=3 일 때
 BACKUP_KEEP=7
 REPL_USER=replicator       # (single) 백업용 복제 유저
+#REPL_PASS=               # (single) 비우면 자동 생성
+
+# ── DB 계정 패스워드 (pg_hba 는 scram-sha-256 만, trust 없음) ─
+#   비우면 자동 생성해서 설치 계정의 ~/.pgpass (0600) 에 저장
+#   허용 문자: 영문/숫자 . _ @ % + = ^ ~ ! # * -   (8자 이상, $ ` ' " \ : 공백 불가)
+#SU_PASS=
 
 # ── pgbackrest 일 때 (BACKUP_TOOL_SEL=pgbackrest) ────────────
 #   single: 저장소 = 이 서버 / ha: 저장소 = etcd 서버

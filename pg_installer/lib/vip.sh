@@ -66,7 +66,7 @@ vip_del() {
 }
 
 # 여러 경로(callback / check)에서 동시에 손대지 않도록 — 변경하는 구간에서만 잡는다
-vip_lock()   { exec 8> "/tmp/pgvip_${CLUSTER_NAME}.lock"; flock -w 30 8 || { log "lock 대기 시간 초과"; return 1; }; }
+vip_lock()   { exec 8> "${LOG%/*}/.pgvip_${CLUSTER_NAME}.lock"; flock -w 30 8 || { log "lock 대기 시간 초과"; return 1; }; }
 vip_unlock() { flock -u 8 2>/dev/null; exec 8>&-; }
 VIPCOMMON
 }
@@ -96,7 +96,7 @@ reconcile() {
     local code
     code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://${NODE_HOST}:${PATRONI_API_PORT}/primary" 2>/dev/null)
     vip_lock || return 0
-    local failf="/tmp/pgvip_${CLUSTER_NAME}.apifail" fails=0
+    local failf="${LOG%/*}/.pgvip_${CLUSTER_NAME}.apifail" fails=0
     if [[ "${code}" == "200" ]]; then
         rm -f "${failf}"
         vip_present || vip_add "check: Patroni 리더인데 VIP 없음"
@@ -178,17 +178,18 @@ fn_vip_preflight() {
 fn_deploy_vip() {
     [[ "${HA_VIP_USE:-n}" == "y" ]] || return 0
     local _dir="${ENGINE_PATH}/etc/patroni"
-    local _m _name _host _ip
+    local _m _name _host _ip _t
+    _t=$(mktemp -d)     # 고정 /tmp 파일명 대신 (다른 계정의 선점/심볼릭 링크 방지)
     for _m in "primary|${HA_PRIMARY_HOST}|${HA_PRIMARY_IP}" "standby|${HA_STANDBY_HOST}|${HA_STANDBY_IP}"; do
         IFS='|' read -r _name _host _ip <<< "${_m}"
         { echo '#!/bin/bash'; echo '# vip_callback.sh — Patroni callback: 역할에 따라 VIP 추가/제거'
-          _vip_conf "${_name}" "${_host}" "${_ip}"; _vip_common_body; _vip_callback_body; } > /tmp/vip_callback.sh.tmp
+          _vip_conf "${_name}" "${_host}" "${_ip}"; _vip_common_body; _vip_callback_body; } > "${_t}/vip_callback.sh"
         { echo '#!/bin/bash'; echo '# vip_check.sh — Patroni 리더와 VIP 위치를 맞춤 (cron 보정)'
-          _vip_conf "${_name}" "${_host}" "${_ip}"; _vip_common_body; _vip_check_body; } > /tmp/vip_check.sh.tmp
+          _vip_conf "${_name}" "${_host}" "${_ip}"; _vip_common_body; _vip_check_body; } > "${_t}/vip_check.sh"
 
         ssh ${SSH_OPTS} "${_host}" "mkdir -p '${_dir}'" >> "${HA_LOG}" 2>&1
-        scp ${SCP_OPTS} /tmp/vip_callback.sh.tmp "${_host}:${_dir}/vip_callback.sh" >> "${HA_LOG}" 2>&1
-        scp ${SCP_OPTS} /tmp/vip_check.sh.tmp    "${_host}:${_dir}/vip_check.sh"    >> "${HA_LOG}" 2>&1
+        scp ${SCP_OPTS} "${_t}/vip_callback.sh" "${_host}:${_dir}/vip_callback.sh" >> "${HA_LOG}" 2>&1
+        scp ${SCP_OPTS} "${_t}/vip_check.sh"    "${_host}:${_dir}/vip_check.sh"    >> "${HA_LOG}" 2>&1
         ssh ${SSH_OPTS} "${_host}" bash >> "${HA_LOG}" 2>&1 <<RVIP
 chmod 750 "${_dir}/vip_callback.sh" "${_dir}/vip_check.sh"
 ( crontab -l 2>/dev/null | grep -vF "${_dir}/vip_check.sh" || true
@@ -196,7 +197,7 @@ chmod 750 "${_dir}/vip_callback.sh" "${_dir}/vip_check.sh"
 RVIP
         info "[${_host}] VIP 스크립트 배포 + 보정 cron 등록 (매분)"
     done
-    rm -f /tmp/vip_callback.sh.tmp /tmp/vip_check.sh.tmp
+    rm -rf "${_t}"
 }
 
 # Patroni 기동 후 VIP 위치 확인
@@ -357,7 +358,7 @@ fn_deploy_vip_watch() {
         echo 'PATRONI_API_PORT="8008"'
         echo "NODE_CHECK=\"${ENGINE_PATH}/etc/patroni/vip_check.sh\""
         # ControlMaster: 20초마다 SSH 핸드셰이크를 새로 하지 않도록 연결 재사용
-        echo "SSH_OPTS=\"-o BatchMode=yes -o ConnectTimeout=3 -o StrictHostKeyChecking=no -p ${HA_SSH_PORT:-22} -o ControlMaster=auto -o ControlPersist=120 -o ControlPath=${VIP_WATCH_HOME}/.ssh-%r@%h:%p\""
+        echo "SSH_OPTS=\"-o BatchMode=yes -o ConnectTimeout=3 -o StrictHostKeyChecking=accept-new -p ${HA_SSH_PORT:-22} -o ControlMaster=auto -o ControlPersist=120 -o ControlPath=${VIP_WATCH_HOME}/.ssh-%r@%h:%p\""
         echo "WATCH_HOME=\"${VIP_WATCH_HOME}\""
         echo 'VIP_PING="y"                 # 방화벽이 ICMP 를 막으면 n'
         echo 'PGMON_HOME=""                 # pgmon 설치 경로를 넣으면 pgmon 알림 채널(notify.conf)로 발송'

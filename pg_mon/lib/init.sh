@@ -173,6 +173,11 @@ setup_target_db() {
         # 모니터링 role 패스워드 설정
         printf "\n"
         ui_prompt "모니터링 role 이름" mon_user "pgmon_monitor"
+        # role 이름은 아래 GRANT 문에 식별자로 들어가므로 일반 식별자만 허용
+        if [[ ! "${mon_user}" =~ ^[a-z_][a-z0-9_]{0,62}$ ]]; then
+            printf "  ${C_BRED}role 이름은 소문자/숫자/_ 만 사용하세요: %s${C_RESET}\n" "${mon_user}"
+            return 1
+        fi
         printf "  ${C_BCYAN}모니터링 role 패스워드${C_RESET}: "
         read -rs mon_pass; printf "\n"
         printf "\n"
@@ -186,16 +191,15 @@ setup_target_db() {
         sql_output=$(PGPASSWORD="$su_pass" psql \
             -h "$host" -p "$port" \
             -U "$su_user" -d "$dbname" \
-            -v ON_ERROR_STOP=1 -q 2>&1 <<SQL
--- role 생성 (이미 있으면 패스)
-DO \$\$
-BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${mon_user}') THEN
-    CREATE ROLE ${mon_user} WITH LOGIN PASSWORD '${mon_pass}' NOSUPERUSER NOCREATEDB NOCREATEROLE;
-  ELSE
-    ALTER ROLE ${mon_user} WITH LOGIN PASSWORD '${mon_pass}';
-  END IF;
-END\$\$;
+            -v ON_ERROR_STOP=1 -v mu="${mon_user}" -v mp="${mon_pass}" -q 2>&1 <<SQL
+-- role 생성 (이미 있으면 패스워드만 변경)
+--  패스워드는 psql 변수 + format(%L) 로 (따옴표가 있어도 깨지지 않음),
+--  log_statement=ddl 이어도 서버 로그에 평문이 남지 않게 이 세션만 끔
+SET log_statement = 'none';
+SELECT format(CASE WHEN EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'mu')
+                   THEN 'ALTER ROLE %I WITH LOGIN PASSWORD %L'
+                   ELSE 'CREATE ROLE %I WITH LOGIN PASSWORD %L NOSUPERUSER NOCREATEDB NOCREATEROLE' END,
+              :'mu', :'mp') \gexec
 
 -- pg_monitor 그룹롤 부여 (pg_stat_activity, pg_stat_replication 등 조회)
 GRANT pg_monitor TO ${mon_user};
@@ -231,13 +235,14 @@ BEGIN
   END IF;
 END\$\$;
 
--- pg_terminate_backend 실행 권한 (session kill 기능용)
-GRANT EXECUTE ON FUNCTION pg_terminate_backend(integer) TO ${mon_user};
-GRANT EXECUTE ON FUNCTION pg_cancel_backend(integer)    TO ${mon_user};
+-- session kill 기능용: pg_terminate_backend / pg_cancel_backend 는 PUBLIC 실행 가능하지만
+--  다른 계정 세션을 끊으려면 pg_signal_backend 멤버여야 함 (superuser 세션은 여전히 불가).
+--  (예전: GRANT EXECUTE ON FUNCTION pg_terminate_backend(integer) — PG14+ 는 (integer, bigint) 라
+--   여기서 에러가 나고 ON_ERROR_STOP 으로 뒤 권한 부여가 전부 빠졌음)
+GRANT pg_signal_backend TO ${mon_user};
 
--- 모든 테이블 통계 조회 (pg_stat_user_tables 등은 기본 접근 가능하지만
---  특정 버전/설정에서 추가 필요할 수 있음)
-GRANT CONNECT ON DATABASE ${dbname} TO ${mon_user};
+-- DB 접속 권한 (DB 이름에 대문자/특수문자가 있어도 되게 %I)
+SELECT format('GRANT CONNECT ON DATABASE %I TO %I', current_database(), :'mu') \gexec
 SQL
         )
 
