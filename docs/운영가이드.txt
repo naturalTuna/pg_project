@@ -2,7 +2,7 @@
   pg_project  운영(관리) 가이드
 ================================================================================
   대상      : naturalTuna/pg_project 로 설치한 PostgreSQL (single / HA)
-  작성일    : 2026-11-09
+  작성일    : 2026-11-09  (11-5 대량 이관 추가: 2026-11-24)
   같이 보기 : 아키텍처_가이드.pdf (그림으로 보는 구성 / 장애 동작)
               설치가이드.txt (설치, 테스트, 재설치)
               pgmon_가이드.txt (모니터링 상세)
@@ -23,7 +23,7 @@
     8. 쿼리 튜닝 - pg_tune
     9. 장애 대응 플레이북
    10. 로그 위치 모음
-   11. 정기 작업 / 변경 작업
+   11. 정기 작업 / 변경 작업  (11-5 대량 데이터 이관 / 마이그레이션)
 
 
 ================================================================================
@@ -494,6 +494,7 @@
     bash wal_cleanup.sh --dry-run -> 정리 기준 확인
     백업이 오래 실패해서 정리가 안 되는 경우가 많음 -> 백업 먼저 성공시키고 정리
     ※ pg_wal 디렉토리 파일을 직접 지우지 말 것
+    대량 이관처럼 WAL 이 한꺼번에 쏟아지는 작업은 미리 11-5 대로 (아카이브 / Standby 분리)
 
  9-7. 노드가 갑자기 리부트됨
     watchdog 동작 가능성 : journalctl -b -1 | grep -i -E 'watchdog|softdog'
@@ -555,6 +556,89 @@
     HA : patroni.yml 의 authentication.superuser / replication password 도 같이 변경
          -> patronictl -c $PYML reload $CL
          복제 유저를 바꾸면 ~/.pgpass 도 갱신
+
+ 11-5. 대량 데이터 이관 (마이그레이션, pgmig 등) - HA
+    왜 따로 준비하나
+      대량 적재는 데이터 크기 이상으로 WAL 이 나온다 (인덱스 생성 포함).
+      그대로 두면 pg_wal 이 두 군데서 쌓인다
+        - Standby 가 못 따라옴   -> 복제 슬롯이 WAL 을 붙잡음
+        - 아카이브가 못 따라옴   -> pgBackRest(etcd 서버) / cp 가 밀려 .ready 적체
+      pg_wal 이 디스크를 채우면 Primary 가 멈춘다 (복구도 어려움)
+      -> 이관 전에 둘 다 끊고, 끝나면 다시 붙인다
+         (repmgr 에서 standby 를 떼고 이관 후 clone 하던 것과 같은 방식)
+
+   [0] 조회 (Primary) - 시작 전 상태 기록
+    patronictl -c $PYML list
+    patronictl -c $PYML show-config | grep -E "archive|synchronous_mode|slots"
+    psql -c "show archive_command;"            -> 값을 복사해 둘 것 (원복용)
+    psql -c "show max_wal_size;"
+    psql -c "select slot_name, slot_type, active,
+             pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)) as retained
+             from pg_replication_slots;"
+    psql -c "select failed_count, last_archived_wal from pg_stat_archiver;"
+    ls /pgdata/data/pg_wal/archive_status/*.ready 2>/dev/null | wc -l    -> 0 에서 시작
+    df -h /pgdata ; du -sh /pgdata/data/pg_wal
+
+   [1] 이관 직전
+    1) 마지막 백업 확인 (필요하면 full 백업 1회) -> 이관 전 복구 기준점
+    2) 아카이브 무력화 (reload 만, 재시작 없음)
+         patronictl -c $PYML edit-config -p 'archive_command=/bin/true' --force
+         psql -c "show archive_command;"       -> /bin/true
+       ※ archive_mode=off 도 되지만 재시작 파라미터라 끌 때 / 켤 때 Primary 재시작 2번.
+         archive_command 를 /bin/true 로 두면 WAL 이 바로 '아카이브 완료' 처리되어
+         체크포인트 후 재활용된다 -> 효과는 같고 재시작 없음
+    3) Standby 분리 (Standby 서버)
+         sudo systemctl stop patroni
+       -> ttl(30초) 후 그 멤버가 DCS 에서 빠지고 Leader 가 그 슬롯을 지움. 확인:
+         psql -c "select slot_name, active from pg_replication_slots;"
+         (DR 용 permanent slot 은 남는다 -> DR 도 이관 후 다시 맞출 것)
+       ※ Standby 를 promote 하지 말 것. Patroni 에서는 리더 2개 = split-brain. 멈추기만
+       ※ synchronous_mode 여도 Standby 가 빠지면 자동 비동기 전환 -> 쓰기 안 멈춤
+    4) 백업 크론 잠시 주석 (아카이브가 꺼져 있으면 어차피 실패)
+         pgBackRest : etcd 서버 crontab -e
+         basebackup : 백업 서버 crontab -e
+    -> 여기부터 [3] 까지는 failover 불가 + PITR 불가 구간
+
+   [2] 이관 중
+    du -sh /pgdata/data/pg_wal       -> 대략 max_wal_size 근처에서 더 안 늘어나야 정상
+    계속 늘면 : 남은 슬롯(permanent slot), 긴 트랜잭션, 체크포인트 로그 확인
+    pgmig      : JOBS 개 세션이 청크를 병렬 이관 (세션은 synchronous_commit=off).
+                 디스크 IO 가 한계면 JOBS 를 줄인다. index 단계(인덱스 + ANALYZE)도 WAL 이 많음
+                 -> 아카이브 / Standby 원복은 index ~ verify ~ fk 까지 끝난 뒤
+
+   [3] 이관 후 (순서대로)
+    1) 아카이브 원복
+         patronictl -c $PYML edit-config -p "archive_command=<[0] 에서 복사한 값>" --force
+         psql -c "show archive_command;"
+         psql -c "select pg_switch_wal();"
+         psql -c "select last_archived_wal, failed_count from pg_stat_archiver;"   -> 갱신 확인
+       예) pgBackRest 기본값
+         /postgres/app/etc/backup/pgbackrest/bin/pgbackrest --stanza=pg-cluster archive-push %p
+    2) 새 기준 full 백업 (필수 - 이관 데이터는 이 백업부터 복구 가능)
+         pgBackRest : (etcd 서버) pgbackrest --stanza=$CL check
+                                  pgbackrest --stanza=$CL --type=full backup
+         basebackup : (백업 서버) bash /postgres/app/etc/backup/basebackup/pg_basebackup.sh
+    3) 백업 크론 원복 (crontab -e 주석 해제)
+    4) Standby 재구성
+         (Standby 서버) sudo systemctl start patroni
+         patronictl -c $PYML reinit $CL <standby 이름> --force
+       -> start 만 하면 예전 위치부터 따라가려 하지만 필요한 WAL 이 없다.
+          restore_command(pgBackRest) 로 받을 수는 있어도 이관 WAL 이 많으면 느림 -> 바로 reinit
+    5) 확인
+         patronictl -c $PYML list            Replica streaming, Lag 0
+         bash ~/pgvip/vip_watch.sh --once    (etcd 서버)
+         psql -c "select slot_name, active from pg_replication_slots;"
+
+   [대안] 아카이브를 끄지 않고 디스크 풀만 막기
+    pgBackRest : DB 노드 /postgres/app/etc/backup/pgbackrest/conf/pgbackrest.conf
+                 의 [<stanza>] 섹션에 추가
+                   archive-push-queue-max=50GB
+                 밀린 WAL 이 이 값을 넘으면 pgBackRest 가 그 WAL 을 버리고 PG 에 '성공' 응답
+                 -> pg_wal 무한 증가 방지. 대신 버린 구간은 PITR 이 끊긴다 (결과는 [1] 과 같음)
+                 평소에도 안전장치로 넣어둘 만함 (버려지면 로그에 남음 -> full 백업 다시)
+    슬롯       : max_slot_wal_keep_size 로 슬롯이 붙잡는 WAL 상한
+                 (넘으면 그 슬롯은 무효화 -> 해당 Standby 는 reinit)
+    ※ wal_level=minimal (WAL 최소화) 은 복제가 안 되므로 Patroni 구성에서는 사용 불가
 
 ================================================================================
   END
