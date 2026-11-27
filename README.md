@@ -223,3 +223,10 @@ PGHOST=... PGUSER=postgres bash pg_mon/tests/test_pgmon_inputs.sh               
 | watchdog 리부트(T7), 전원 OFF, 전체 재부팅, HA PITR | 실서버 확인 필요 |
 | PG 마이너 업그레이드 | 자동화 안 됨 (운영가이드 11-2 수동 절차) |
 | scram 인증 / REST 인증 / .pgpass (이번 변경) | 로컬 테스트 (PG16 + Patroni 4.1 + etcd 3.5, 위 테스트 스크립트), **실서버 미검증** |
+
+## License
+
+MIT License — Copyright (c) 2026 naturalTuna (https://github.com/naturalTuna/pg_project)
+
+저작권 표기와 라이선스 문구(`LICENSE`)를 남기면 누구나 사용·수정·재배포할 수 있습니다.
+코드 파일 상단의 `SPDX-License-Identifier: MIT` / `Copyright (c) 2026 naturalTuna` 줄을 지우지 마세요.

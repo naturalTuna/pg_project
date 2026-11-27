@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 naturalTuna — https://github.com/naturalTuna/pg_project
 # ============================================================
 #  PostgreSQL Install Script v1.0
 #  - single 모드 : 로컬 서버에 PostgreSQL 설치

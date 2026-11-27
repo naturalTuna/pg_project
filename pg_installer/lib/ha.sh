@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 naturalTuna — https://github.com/naturalTuna/pg_project
 # ============================================================
 #  lib/ha.sh  —  HA 모드 설치 (etcd + Patroni, Primary / Standby 배포)
 #  postgresql_install.sh 가 source 해서 사용 (단독 실행 X)

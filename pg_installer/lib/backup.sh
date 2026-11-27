@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 naturalTuna — https://github.com/naturalTuna/pg_project
 # ============================================================
 #  lib/backup.sh  —  백업 스크립트 생성·배포·크론 등록 (single / HA 공통)
 #  postgresql_install.sh 가 source 해서 사용 (단독 실행 X)

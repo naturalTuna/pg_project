@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 naturalTuna — https://github.com/naturalTuna/pg_project
 # ============================================================
 #  lib/vip.sh  —  HA VIP (Primary 를 따라 이동하는 가상 IP)
 #  postgresql_install.sh 가 source 해서 사용 (단독 실행 X)

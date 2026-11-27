@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 naturalTuna — https://github.com/naturalTuna/pg_project
 """
 아키텍처 가이드 (그림 포함) 생성기
   python3 docs/src/build_arch.py            → docs/아키텍처_가이드.html, docs/아키텍처_가이드.pdf

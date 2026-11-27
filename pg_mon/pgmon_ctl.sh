@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 naturalTuna — https://github.com/naturalTuna/pg_project
 # =============================================================
 #  pgmon_ctl.sh – pgmon collector 상시 실행 관리 (일반 계정, root 불필요)
 # =============================================================
