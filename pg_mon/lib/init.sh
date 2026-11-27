@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # =============================================================
 # lib/init.sh  – 최초 초기화 및 DB 등록 관리
+#
+#  pg_project / pgmon — Copyright (c) 2026 naturalTuna
+#  https://github.com/naturalTuna/pg_project
 # =============================================================
 source "$(dirname "${BASH_SOURCE[0]}")/ui.sh"
 
@@ -82,12 +85,21 @@ init_repo_db() {
     local pg_pass="${2:-}"
 
     printf "  ${C_DIM}init.sql 실행 중...${C_RESET}\n"
+    # [보안 — naturalTuna] 저장소 유저가 pgmon_writer 면, 방금 입력한 저장소 패스워드를
+    #   pgmon_writer 비밀번호로 설정 (예전: init.sql 이 비번=롤명 으로 고정 생성)
+    #   psql -v 로 넘기면 프로세스 목록(ps)에 비번이 보이므로 \set 한 줄을 스크립트 앞에 붙여 stdin 으로 전달
+    #   psql 메타명령 인자 규칙: 작은따옴표 안에서 ' → '' , \ → \\
+    local wp=""
+    if [[ "$REPO_USER" == "pgmon_writer" && -n "$REPO_PASS" ]]; then
+        wp="${REPO_PASS//\\/\\\\}"; wp="${wp//\'/\'\'}"
+    fi
     local output
-    output=$(PGPASSWORD="$pg_pass" psql \
-        -h "$REPO_HOST" -p "$REPO_PORT" \
-        -U "$pg_super" -d postgres \
-        -f "${PGMON_HOME}/sql/init.sql" \
-        -q 2>&1)
+    output=$({ [[ -n "$wp" ]] && printf '%s\n' "\\set writer_pass '${wp}'"
+               cat "${PGMON_HOME}/sql/init.sql"; } \
+             | PGPASSWORD="$pg_pass" psql \
+                 -h "$REPO_HOST" -p "$REPO_PORT" \
+                 -U "$pg_super" -d postgres \
+                 -q 2>&1)
     local rc=$?
 
     # 실제 오류만 걸러냄 (already exists 류 NOTICE는 무시)
@@ -454,14 +466,22 @@ _sync_targets_to_repo() {
         pass="$(_pgmon_k1="TARGET_${i}_PASS"; echo "${!_pgmon_k1}")"
         retention="$(_pgmon_k1="TARGET_${i}_RETENTION"; echo "${!_pgmon_k1:-15}")"
 
-        repo_psql -q -c "
+        # [보안 — naturalTuna]
+        #  - 대상 DB 비밀번호는 저장소 DB 에 저장하지 않음 (password=NULL). 수집기는 conf(0600) 에서 읽음
+        #    예전: 평문 저장 + pgmon_reader 도 조회 가능 → 모니터 계정 비번 유출 경로
+        #  - 값은 psql 변수(:'x')로 넘김 → 닉네임/호스트에 따옴표가 있어도 SQL 이 깨지지 않음
+        #    (psql -c 는 변수 치환을 안 하므로 stdin 으로 실행)
+        [[ "$port" =~ ^[0-9]+$ ]] || port=5432
+        [[ "$retention" =~ ^[0-9]+$ ]] || retention=15
+        repo_psql -q -v nick="$nick" -v host="$host" -v port="$port" -v dbname="$dbname" \
+                  -v user="$user" -v ret="$retention" <<'SYNCSQL' 2>/dev/null
 INSERT INTO pgmon.registered_db
     (nickname, host, port, dbname, username, password, retention_days)
 VALUES
-    ('${nick}', '${host}', ${port}, '${dbname}', '${user}', '${pass}', ${retention})
+    (:'nick', :'host', :'port'::int, :'dbname', :'user', NULL, :'ret'::int)
 ON CONFLICT (nickname) DO UPDATE SET
     host=EXCLUDED.host, port=EXCLUDED.port, dbname=EXCLUDED.dbname,
-    username=EXCLUDED.username, password=EXCLUDED.password,
+    username=EXCLUDED.username, password=NULL,
     retention_days=EXCLUDED.retention_days, active=true, updated_at=now();
 
 -- 기본 수집 설정 삽입
@@ -477,9 +497,10 @@ FROM pgmon.registered_db,
         ('lock',      15),
         ('replication', 15)
      ) AS m(metric, secs)
-WHERE nickname = '${nick}'
+WHERE nickname = :'nick'
 ON CONFLICT (db_id, metric_name) DO NOTHING;
-" 2>/dev/null
+SYNCSQL
+        : "${pass:-}"   # 비번은 저장소로 보내지 않음 (conf 에만)
     done
 }
 
