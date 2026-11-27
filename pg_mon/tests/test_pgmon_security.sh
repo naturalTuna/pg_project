@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 naturalTuna — https://github.com/naturalTuna/pg_project
 # =============================================================
 # pgmon 보안 / 성능 수정 검증 테스트
 #   pg_project / pgmon — Copyright (c) 2026 naturalTuna

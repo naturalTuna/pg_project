@@ -1,3 +1,5 @@
+-- SPDX-License-Identifier: MIT
+-- Copyright (c) 2026 naturalTuna — https://github.com/naturalTuna/pg_project
 -- =============================================================
 -- pgmon : 모니터링 저장소 DB 초기화 SQL
 -- 실행 방법: psql -U postgres -d postgres -f init.sql
