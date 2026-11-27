@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 naturalTuna — https://github.com/naturalTuna/pg_project
 # docs/*.txt → PDF, 아키텍처 가이드(그림) → HTML + PDF 재생성
 #   필요: python3 + playwright (pip install playwright && playwright install chromium)
 #         폰트 Noto Sans CJK KR / Noto Sans Mono CJK KR

@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 naturalTuna — https://github.com/naturalTuna/pg_project
 # ============================================================
 #  lib/patroni_common.sh  —  Patroni 원격 설치 (postgresql_install.sh / add_node.sh 공용)
 #  필요 변수: SSH_OPTS, SCP_OPTS, PATRONI_PKGS, HA_LOG

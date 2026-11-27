@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 naturalTuna — https://github.com/naturalTuna/pg_project
 import sys, re, html, asyncio, unicodedata
 from playwright.async_api import async_playwright
 

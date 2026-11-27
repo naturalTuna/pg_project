@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 naturalTuna — https://github.com/naturalTuna/pg_project
 # ============================================================
 #  lib/pgbackrest.sh  —  pgBackRest 빌드 / 설정 / 크론 / 복구 스크립트 (single / HA)
 #  postgresql_install.sh 가 source 해서 사용 (단독 실행 X)

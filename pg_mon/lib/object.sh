@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 naturalTuna — https://github.com/naturalTuna/pg_project
 # =============================================================
 # lib/object.sh  – 오브젝트 (테이블 / 인덱스) 화면
 # =============================================================

@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 naturalTuna — https://github.com/naturalTuna/pg_project
 # ============================================================
 #  lib/single.sh  —  SINGLE 모드 설치 (로컬 서버)
 #  postgresql_install.sh 가 source 해서 사용 (단독 실행 X)

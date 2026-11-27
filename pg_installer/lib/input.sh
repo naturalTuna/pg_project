@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 naturalTuna — https://github.com/naturalTuna/pg_project
 # ============================================================
 #  lib/input.sh  —  실행 옵션·응답 파일 처리, 설치 입력값 수집, 설정 확인, 로그 초기화
 #  postgresql_install.sh 가 source 해서 사용 (단독 실행 X)

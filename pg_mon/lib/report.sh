@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 naturalTuna — https://github.com/naturalTuna/pg_project
 # =============================================================
 # lib/report.sh  – 기간별 트렌드 리포트 화면
 # =============================================================

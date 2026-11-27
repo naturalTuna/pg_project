@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 naturalTuna — https://github.com/naturalTuna/pg_project
 # ============================================================
 #  lib/ha_safety.sh  —  HA 안전장치 (split-brain / 데이터 유실 방지)
 #  postgresql_install.sh 가 source 해서 사용 (단독 실행 X)

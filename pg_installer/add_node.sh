@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 naturalTuna — https://github.com/naturalTuna/pg_project
 # ============================================================
 #  add_node.sh  —  기존 Patroni HA 클러스터에 DB 노드 추가 / DR 클러스터 구성
 #

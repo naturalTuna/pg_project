@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 naturalTuna — https://github.com/naturalTuna/pg_project
 # ============================================================
 #  lib/common.sh  —  출력 함수 / conf 생성 / 패키지 설치 / 빌드 / 공통 유틸
 #  postgresql_install.sh 가 source 해서 사용 (단독 실행 X)
