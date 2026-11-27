@@ -1,7 +1,22 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 naturalTuna — https://github.com/naturalTuna/pg_project
 # =============================================================
 # collector/collect.sh  – 백그라운드 수집 데몬
 # 사용법: collect.sh <TARGET_IDX>
+#
+#  pg_project / pgmon — Copyright (c) 2026 naturalTuna
+#  https://github.com/naturalTuna/pg_project
+#
+# [보안 원칙 — naturalTuna]
+#  대상 DB 에서 읽어 온 값(테이블명, 유저명, 쿼리 문자열, 버전 문자열 …)은
+#  대상 DB 의 "일반 사용자"도 마음대로 정할 수 있는 값이다.
+#  예) CREATE TABLE "x');DROP TABLE pgmon.snap_session;--"(a int);
+#  이 값을 저장소 DB 의 INSERT 문에 그대로 이어 붙이면 저장소 DB 에서 임의 SQL 이 실행된다.
+#  → 저장소로 보내는 값은 반드시 아래 헬퍼로만 SQL 에 넣는다.
+#      _q  문자열  : 작은따옴표 이스케이프 후 '...' 로 감쌈
+#      _n  숫자    : 숫자 형식이 아니면 NULL (숫자 자리에 문자열이 끼어드는 것 차단)
+#      _b  불리언  : t/f 외에는 NULL
 # =============================================================
 # set -e 사용하지 않음: 대상 DB 일시 장애/쿼리 실패 한 번에 데몬 전체가
 # 조용히 죽지 않도록 한다 (pgmon.sh 와 동일 정책)
@@ -12,14 +27,21 @@ PGMON_HOME="${PGMON_HOME:-$(cd "$(dirname "$0")/.." && pwd)}"
 source "${PGMON_HOME}/conf/pgmon.conf"
 
 # ── psql helpers ─────────────────────────────────────────────
+# 대상 DB 조회. 필드 구분자는 '|' 대신 0x1F(Unit Separator)
+#   테이블명/유저명/앱이름에 '|' 가 들어가도 컬럼이 밀리지 않게 (naturalTuna)
+FS=$'\x1f'
 _tpsql() {
     local host="$(_pgmon_k1="TARGET_${TARGET_IDX}_HOST"; echo "${!_pgmon_k1}")"
     local port="$(_pgmon_k1="TARGET_${TARGET_IDX}_PORT"; echo "${!_pgmon_k1:-5432}")"
     local dbname="$(_pgmon_k1="TARGET_${TARGET_IDX}_DBNAME"; echo "${!_pgmon_k1}")"
     local user="$(_pgmon_k1="TARGET_${TARGET_IDX}_USER"; echo "${!_pgmon_k1}")"
     local pass="$(_pgmon_k1="TARGET_${TARGET_IDX}_PASS"; echo "${!_pgmon_k1}")"
+    # [안정성 — naturalTuna] 대상 DB 에 ACCESS EXCLUSIVE 잠금(ALTER/VACUUM FULL/LOCK TABLE 등)이
+    #   걸려 있으면 pg_total_relation_size 같은 조회가 타임아웃 없이 무한 대기 → 수집 루프 전체가 멈췄음
+    #   → 잠금은 3초, 쿼리는 30초 넘으면 그 회차 수집만 실패하고 다음 메트릭으로 진행
+    PGOPTIONS="-c lock_timeout=${PGMON_LOCK_TIMEOUT:-3s} -c statement_timeout=${PGMON_STMT_TIMEOUT:-30s}" \
     PGPASSWORD="$pass" psql -h "$host" -p "$port" \
-        -U "$user" -d "$dbname" -Atc "$1" 2>/dev/null
+        -U "$user" -d "$dbname" -At -F "$FS" -c "$1" 2>/dev/null
 }
 
 _rpsql() {
@@ -36,10 +58,21 @@ _rpsql_exec() {
         -c "$1" -q 2>/dev/null
 }
 
-# DB ID 조회
+# ── SQL 값 헬퍼 (저장소 INSERT 용 — 위 [보안 원칙] 참고) ─────
+# 문자열: ' → '' 이스케이프 후 '...' 로 감쌈 (standard_conforming_strings=on 기본 전제)
+_q() { local v="${1//\'/\'\'}"; printf "'%s'" "$v"; }
+# 숫자: 정수/소수/지수 형식만 그대로, 빈 값이나 그 외(문자열 등)는 NULL
+_n() {
+    if [[ "$1" =~ ^-?[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?$ ]]; then printf '%s' "$1"; else printf 'NULL'; fi
+}
+# psql 의 t/f → SQL boolean (그 외 NULL)
+_b() { case "$1" in t|true) printf 'true' ;; f|false) printf 'false' ;; *) printf 'NULL' ;; esac; }
+
+# DB ID 조회 (닉네임도 이스케이프 — conf 값이지만 따옴표가 들어가도 깨지지 않게)
 NICK="$(_pgmon_k1="TARGET_${TARGET_IDX}_NICKNAME"; echo "${!_pgmon_k1}")"
-DB_ID=$(_rpsql "SELECT db_id FROM pgmon.registered_db WHERE nickname='${NICK}'")
+DB_ID=$(_rpsql "SELECT db_id FROM pgmon.registered_db WHERE nickname=$(_q "$NICK")")
 : "${DB_ID:?DB_ID 조회 실패 — nickname=${NICK}}"
+[[ "$DB_ID" =~ ^[0-9]+$ ]] || { echo "DB_ID 형식 오류: $DB_ID" >&2; exit 1; }
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [collector:${NICK}] $*"; }
 
@@ -55,18 +88,32 @@ fi
 # shellcheck source=../lib/notify.sh
 source "${PGMON_HOME}/lib/notify.sh"
 
-# ── 수집 주기 조회 ────────────────────────────────────────────
+# ── 수집 주기 조회 (캐시) ─────────────────────────────────────
+# [성능 — naturalTuna]
+#  예전: 5초 루프마다 메트릭 7개를 각각 조회 → 대상 DB 1개당 5초에 psql 7회 기동 + 접속/인증 7회
+#        (대상 10개면 저장소 DB 에 분당 약 840회 접속)
+#  지금: 한 번의 쿼리로 전 메트릭 주기를 읽어 연관배열에 저장, INTERVAL_CACHE_SEC(기본 60초)마다 갱신
+#        → 주기 변경(설정 메뉴)은 최대 60초 뒤에 반영됨
+declare -A INTERVAL
+INTERVAL_LOADED=0
+INTERVAL_CACHE_SEC="${INTERVAL_CACHE_SEC:-60}"
+load_intervals() {
+    local rows metric sec ena
+    rows=$(_rpsql "
+SELECT metric_name, interval_sec, enabled FROM pgmon.collection_config
+WHERE db_id=${DB_ID}") || return 0          # 저장소 일시 장애면 이전 값 유지
+    INTERVAL=()
+    while IFS='|' read -r metric sec ena; do
+        [[ -z "$metric" ]] && continue
+        # enabled=false 면 0 → 메인 루프에서 수집 생략
+        if [[ "$ena" == "f" ]]; then INTERVAL[$metric]=0; else INTERVAL[$metric]=${sec:-60}; fi
+    done <<< "$rows"
+    INTERVAL_LOADED=$(date +%s)
+}
 get_interval() {
-    local metric=$1
-    local sec
-    local row ena
-    row=$(_rpsql "
-SELECT interval_sec, enabled FROM pgmon.collection_config
-WHERE db_id=${DB_ID} AND metric_name='${metric}'")
-    IFS='|' read -r sec ena <<< "${row}"
-    # enabled=false 면 0 반환 → 메인 루프에서 수집 생략
-    [[ "${ena}" == "f" ]] && { echo 0; return; }
-    echo "${sec:-60}"
+    local v=${INTERVAL[$1]:-60}             # 설정 행이 없으면 기본 60초 (예전과 동일)
+    [[ "$v" =~ ^[0-9]+$ ]] || v=60
+    echo "$v"
 }
 
 # ── 타임스탬프 추적 ───────────────────────────────────────────
@@ -93,31 +140,23 @@ collect_dashboard() {
 
     wal_bytes=$(_tpsql "SELECT coalesce(sum(size),0) FROM pg_ls_waldir()" || echo 0)
 
-    read -r tot_sess act idle itx long_s < <(
+    # [성능 — naturalTuna] 세션 집계 4개 쿼리(접속 4회)를 pg_stat_activity 1회 조회로 합침
+    #   lck / vac 는 예전과 같이 backend_type 조건 없이 전체 세션 기준
+    read -r tot_sess act idle itx long_s long_sql lck vac < <(
         _tpsql "
 SELECT
-    count(*),
-    count(*) FILTER (WHERE state='active'),
-    count(*) FILTER (WHERE state='idle'),
-    count(*) FILTER (WHERE state='idle in transaction'),
-    count(*) FILTER (WHERE state='active'
-        AND now()-query_start > interval '5 minutes')
-FROM pg_stat_activity
-WHERE backend_type='client backend'" | tr '|' ' '
+    count(*) FILTER (WHERE backend_type='client backend'),
+    count(*) FILTER (WHERE backend_type='client backend' AND state='active'),
+    count(*) FILTER (WHERE backend_type='client backend' AND state='idle'),
+    count(*) FILTER (WHERE backend_type='client backend' AND state='idle in transaction'),
+    count(*) FILTER (WHERE backend_type='client backend' AND state='active'
+        AND now()-query_start > interval '5 minutes'),
+    count(*) FILTER (WHERE backend_type='client backend' AND state='active'
+        AND now()-query_start > interval '30 seconds'),
+    count(*) FILTER (WHERE wait_event_type='Lock'),
+    count(*) FILTER (WHERE query ILIKE '%vacuum%' AND state='active')
+FROM pg_stat_activity" | tr "$FS" ' '
     )
-
-    long_sql=$(_tpsql "
-SELECT count(*) FROM pg_stat_activity
-WHERE state='active' AND now()-query_start > interval '30 seconds'
-  AND backend_type='client backend'")
-
-    lck=$(_tpsql "
-SELECT count(*) FROM pg_stat_activity
-WHERE wait_event_type='Lock'")
-
-    vac=$(_tpsql "
-SELECT count(*) FROM pg_stat_activity
-WHERE query ILIKE '%vacuum%' AND state='active'")
 
     dead=$(_tpsql "
 SELECT coalesce(sum(n_dead_tup),0) FROM pg_stat_user_tables")
@@ -134,14 +173,14 @@ INSERT INTO pgmon.snap_server_info (
     disk_read_kbs, disk_write_kbs
 ) VALUES (
     ${DB_ID},
-    '${pg_version}', '${hostname}', '$(_pgmon_k1="TARGET_${TARGET_IDX}_HOST"; echo "${!_pgmon_k1}")',
-    '${ha_role}', ${wal_bytes:-0},
-    ${tot_sess:-0}, ${act:-0}, ${idle:-0},
-    ${itx:-0}, ${long_s:-0}, ${long_sql:-0},
-    ${lck:-0}, ${vac:-0}, ${dead:-0},
-    ${CPU_USAGE:-0}, ${MEM_TOTAL:-0}, ${MEM_USED:-0}, ${MEM_PCT:-0},
-    ${SWAP_TOTAL:-0}, ${SWAP_USED:-0}, ${SWAP_PCT:-0},
-    ${DISK_READ_KB:-0}, ${DISK_WRITE_KB:-0}
+    $(_q "$pg_version"), $(_q "$hostname"), $(_q "$(_pgmon_k1="TARGET_${TARGET_IDX}_HOST"; echo "${!_pgmon_k1}")"),
+    $(_q "$ha_role"), $(_n "${wal_bytes:-0}"),
+    $(_n "${tot_sess:-0}"), $(_n "${act:-0}"), $(_n "${idle:-0}"),
+    $(_n "${itx:-0}"), $(_n "${long_s:-0}"), $(_n "${long_sql:-0}"),
+    $(_n "${lck:-0}"), $(_n "${vac:-0}"), $(_n "${dead:-0}"),
+    $(_n "${CPU_USAGE:-0}"), $(_n "${MEM_TOTAL:-0}"), $(_n "${MEM_USED:-0}"), $(_n "${MEM_PCT:-0}"),
+    $(_n "${SWAP_TOTAL:-0}"), $(_n "${SWAP_USED:-0}"), $(_n "${SWAP_PCT:-0}"),
+    $(_n "${DISK_READ_KB:-0}"), $(_n "${DISK_WRITE_KB:-0}")
 )"
 }
 
@@ -161,13 +200,11 @@ WHERE backend_type='client backend'")
     [[ -z "$rows" ]] && return
 
     local vals=""
-    while IFS='|' read -r pid usn app caddr state wet we dur qry btype; do
-        # SQL injection 방어: single quote 이스케이프
-        qry="${qry//\'/\'\'}"
-        app="${app//\'/\'\'}"
+    while IFS="$FS" read -r pid usn app caddr state wet we dur qry btype; do
+        # 전 필드 이스케이프 (예전엔 qry/app 만 이스케이프 → usename 등으로 주입 가능했음)
         [[ -z "$vals" ]] || vals+=","
-        vals+="(${DB_ID},'${pid}','${usn}','${app}','${caddr}','${state}',
-                '${wet}','${we}',${dur:-NULL},'${qry}','${btype}')"
+        vals+="(${DB_ID},$(_n "$pid"),$(_q "$usn"),$(_q "$app"),$(_q "$caddr"),$(_q "$state"),
+                $(_q "$wet"),$(_q "$we"),$(_n "$dur"),$(_q "$qry"),$(_q "$btype"))"
     done <<< "$rows"
 
     [[ -z "$vals" ]] && return
@@ -208,12 +245,12 @@ LIMIT 50")
     [[ -z "$rows" ]] && return
 
     local vals=""
-    while IFS='|' read -r qid usn dbn calls totms meanms maxms rows_cnt hit read pct qry; do
-        qry="${qry//\'/\'\'}"
+    while IFS="$FS" read -r qid usn dbn calls totms meanms maxms rows_cnt hit read pct qry; do
+        # 롤 이름/DB 이름도 대상 DB 에서 만들 수 있는 값 → 이스케이프
         [[ -z "$vals" ]] || vals+=","
-        vals+="(${DB_ID},${qid},'${usn}','${dbn}',${calls},
-                ${totms:-0},${meanms:-0},${maxms:-0},${rows_cnt:-0},
-                ${hit:-0},${read:-0},${pct:-NULL},'${qry}')"
+        vals+="(${DB_ID},$(_n "$qid"),$(_q "$usn"),$(_q "$dbn"),$(_n "${calls:-0}"),
+                $(_n "${totms:-0}"),$(_n "${meanms:-0}"),$(_n "${maxms:-0}"),$(_n "${rows_cnt:-0}"),
+                $(_n "${hit:-0}"),$(_n "${read:-0}"),$(_n "$pct"),$(_q "$qry"))"
     done <<< "$rows"
 
     [[ -z "$vals" ]] && return
@@ -248,18 +285,21 @@ FROM pg_stat_activity
 WHERE (query ILIKE '%vacuum%') AND state='active'" | tr '[:upper:]' '[:lower:]')
 
     local vals=""
-    while IFS='|' read -r sch tbl lv lav la dead live ratio vcnt avcnt; do
+    while IFS="$FS" read -r sch tbl lv lav la dead live ratio vcnt avcnt; do
         local is_running=false
-        if echo "$running_tables" | grep -qi "${sch}.${tbl}"; then
+        # -F : 테이블명을 정규식이 아닌 고정 문자열로 비교 (이름의 '.' '*' 등 오매칭 방지)
+        if grep -qiF -- "${sch}.${tbl}" <<< "$running_tables"; then
             is_running=true
         fi
-        local lv_v="NULL"; [[ -n "$lv"  ]] && lv_v="'${lv}'"
-        local lav_v="NULL";[[ -n "$lav" ]] && lav_v="'${lav}'"
-        local la_v="NULL"; [[ -n "$la"  ]] && la_v="'${la}'"
+        # ⚠ 예전 코드는 sch/tbl 을 이스케이프 없이 '${sch}' 로 넣어서
+        #   대상 DB 의 일반 사용자가 테이블 이름으로 저장소 DB 에 SQL 을 주입할 수 있었음 (재현됨) — naturalTuna
+        local lv_v="NULL";  [[ -n "$lv"  ]] && lv_v="$(_q "$lv")::timestamptz"
+        local lav_v="NULL"; [[ -n "$lav" ]] && lav_v="$(_q "$lav")::timestamptz"
+        local la_v="NULL";  [[ -n "$la"  ]] && la_v="$(_q "$la")::timestamptz"
         [[ -z "$vals" ]] || vals+=","
-        vals+="(${DB_ID},'${sch}','${tbl}',${lv_v},${lav_v},${la_v},
-                ${dead:-0},${live:-0},${ratio:-NULL},
-                ${vcnt:-0},${avcnt:-0},${is_running})"
+        vals+="(${DB_ID},$(_q "$sch"),$(_q "$tbl"),${lv_v},${lav_v},${la_v},
+                $(_n "${dead:-0}"),$(_n "${live:-0}"),$(_n "$ratio"),
+                $(_n "${vcnt:-0}"),$(_n "${avcnt:-0}"),${is_running})"
     done <<< "$rows"
 
     [[ -z "$vals" ]] && return
@@ -291,11 +331,10 @@ WHERE blocked.wait_event_type='Lock'")
     [[ -z "$rows" ]] && return
 
     local vals=""
-    while IFS='|' read -r bpid busr bqry dpid dusr dqry dur wtype; do
-        bqry="${bqry//\'/\'\'}"; dqry="${dqry//\'/\'\'}"
+    while IFS="$FS" read -r bpid busr bqry dpid dusr dqry dur wtype; do
         [[ -z "$vals" ]] || vals+=","
-        vals+="(${DB_ID},${bpid},'${busr}','${bqry}',
-                ${dpid},'${dusr}','${dqry}',${dur:-0},'${wtype}')"
+        vals+="(${DB_ID},$(_n "$bpid"),$(_q "$busr"),$(_q "$bqry"),
+                $(_n "$dpid"),$(_q "$dusr"),$(_q "$dqry"),$(_n "${dur:-0}"),$(_q "$wtype"))"
     done <<< "$rows"
 
     [[ -z "$vals" ]] && return
@@ -305,13 +344,6 @@ INSERT INTO pgmon.snap_lock
      blocked_pid,blocked_user,blocked_query,blocked_duration_sec,lock_type)
 VALUES ${vals}" || log "snap_lock INSERT 실패"
 }
-
-# ── SQL 문자열 이스케이프 ('' 처리) ──────────────────────────
-_q() { local v="${1//\'/\'\'}"; printf "'%s'" "$v"; }
-# 빈 값이면 NULL, 아니면 숫자 그대로
-_n() { [[ -n "$1" ]] && printf '%s' "$1" || printf 'NULL'; }
-# psql 의 t/f → SQL boolean
-_b() { case "$1" in t|true) printf 'true' ;; f|false) printf 'false' ;; *) printf 'NULL' ;; esac; }
 
 # ── Replication 수집 ─────────────────────────────────────────
 #  primary : pg_stat_replication (standby 별 1행)
@@ -331,7 +363,7 @@ SELECT coalesce(host(client_addr),'local'), usename, application_name,
        round(extract(epoch FROM flush_lag)::numeric,1),
        coalesce(pg_wal_lsn_diff(pg_current_wal_lsn(), replay_lsn),0)::bigint
 FROM pg_stat_replication")
-        while IFS='|' read -r ca usn app st sst sl wl fl rl rlag wlag flag lagb; do
+        while IFS="$FS" read -r ca usn app st sst sl wl fl rl rlag wlag flag lagb; do
             [[ -z "$ca$usn$app" ]] && continue
             [[ -z "$vals" ]] || vals+=","
             vals+="(${DB_ID},'primary',$(_q "$ca"),$(_q "$usn"),$(_q "$app"),$(_q "$st"),$(_q "$sst"),
@@ -349,7 +381,7 @@ SELECT coalesce((SELECT sender_host FROM pg_stat_wal_receiver),''),
             ELSE round(coalesce(extract(epoch FROM now() - pg_last_xact_replay_timestamp()),0)::numeric,1)
        END")
         local sender status rcv rpl lagb lags
-        IFS='|' read -r sender status rcv rpl lagb lags <<< "$rows"
+        IFS="$FS" read -r sender status rcv rpl lagb lags <<< "$rows"
         vals="(${DB_ID},'standby',$(_q "$sender"),NULL,NULL,$(_q "$status"),NULL,
                NULL,NULL,$(_q "$rcv"),$(_q "$rpl"),
                $(_n "$lags")*interval '1 second',NULL,NULL,$(_n "$lagb"),$(_n "$lags"))"
@@ -373,7 +405,7 @@ SELECT s.slot_name, s.slot_type, s.active,
        coalesce(to_jsonb(s)->>'wal_status','')
 FROM pg_replication_slots s")
     vals=""
-    while IFS='|' read -r sn stp act ret ws; do
+    while IFS="$FS" read -r sn stp act ret ws; do
         [[ -z "$sn" ]] && continue
         [[ -z "$vals" ]] || vals+=","
         vals+="(${DB_ID},$(_q "$sn"),$(_q "$stp"),$(_b "$act"),$(_n "$ret"),$(_q "$ws"))"
@@ -396,7 +428,7 @@ SELECT schemaname, relname,
 FROM pg_stat_user_tables
 ORDER BY pg_total_relation_size(relid) DESC
 LIMIT 100")
-    while IFS='|' read -r sch tbl tot tsz isz seq idx live dead ratio; do
+    while IFS="$FS" read -r sch tbl tot tsz isz seq idx live dead ratio; do
         [[ -z "$tbl" ]] && continue
         [[ -z "$vals" ]] || vals+=","
         vals+="(${DB_ID},$(_q "$sch"),$(_q "$tbl"),$(_n "$tot"),$(_n "$tsz"),$(_n "$isz"),
@@ -416,7 +448,7 @@ JOIN pg_index i ON i.indexrelid = s.indexrelid
 ORDER BY pg_relation_size(s.indexrelid) DESC
 LIMIT 200")
     vals=""
-    while IFS='|' read -r sch tbl ix sz scan trd tft uq pk; do
+    while IFS="$FS" read -r sch tbl ix sz scan trd tft uq pk; do
         [[ -z "$ix" ]] && continue
         [[ -z "$vals" ]] || vals+=","
         vals+="(${DB_ID},$(_q "$sch"),$(_q "$tbl"),$(_q "$ix"),$(_n "$sz"),
@@ -431,15 +463,30 @@ VALUES ${vals}" || log "snap_index INSERT 실패"; }
 }
 
 # ── 데이터 정리 (retention) ──────────────────────────────────
+# [성능 — naturalTuna]
+#  신규 설치(init.sql, PG11+)는 snap_* 테이블이 collected_at 기준 "일 단위 파티션"
+#    → 오래된 날짜는 파티션 통째로 DROP (DELETE 가 남기던 dead tuple / WAL / vacuum 부담 없음)
+#    → pgmon.maintain_partitions() 가 앞으로 쓸 파티션 생성 + 보관기간 지난 파티션 삭제
+#       (가장 긴 보관기간 기준. 그보다 짧은 보관기간의 DB 만 아래 DELETE 로 추가 정리)
+#  기존 설치본(일반 테이블)은 예전처럼 DELETE — 파티션으로 바꾸려면 docs/pgmon_가이드.txt 참고
 purge_old_data() {
-    local retention
+    local retention maxret
     retention=$(_rpsql "
 SELECT retention_days FROM pgmon.registered_db WHERE db_id=${DB_ID}")
-    retention="${retention:-15}"
+    [[ "$retention" =~ ^[0-9]+$ ]] || retention=15
 
+    # 파티션 관리 함수가 있으면 호출 (없으면 기존 설치본 → 조용히 넘어감)
+    maxret=$(_rpsql "SELECT pgmon.maintain_partitions()" 2>/dev/null) || maxret=""
+
+    local tbl is_part
     for tbl in snap_server_info snap_session snap_statement \
                snap_vacuum snap_lock snap_table snap_index snap_replication \
                snap_repl_slot; do
+        is_part=$(_rpsql "SELECT relkind = 'p' FROM pg_class WHERE oid = to_regclass('pgmon.${tbl}')")
+        # 파티션 테이블이고 이 DB 보관기간이 가장 긴 보관기간 이상이면 DROP 에 맡김 (DELETE 생략)
+        if [[ "$is_part" == "t" && "$maxret" =~ ^[0-9]+$ && "$retention" -ge "$maxret" ]]; then
+            continue
+        fi
         _rpsql_exec "
 DELETE FROM pgmon.${tbl}
 WHERE db_id=${DB_ID}
@@ -521,8 +568,8 @@ ORDER BY dead_ratio_pct DESC NULLS LAST LIMIT 1")
 _check_metric() {
     local metric=$1
     local val=$2
-    local detail="${3:-}"     # 메시지에 덧붙일 상세 (테이블명, 슬롯명 등)
-    detail="${detail//\'/\'\'}"
+    local detail="${3:-}"     # 메시지에 덧붙일 상세 (테이블명, 슬롯명 등 — 대상 DB 유래 값)
+    [[ "$val" =~ ^-?[0-9]+(\.[0-9]+)?$ ]] || val=0   # 숫자 아니면 0 (bc / INSERT 보호)
 
     local thresholds
     thresholds=$(_rpsql "
@@ -572,8 +619,8 @@ WHERE db_id=${DB_ID} AND metric_name='${metric}'
 INSERT INTO pgmon.alert_history
     (db_id, metric_name, severity, current_value, threshold, message)
 VALUES
-    (${DB_ID}, '${metric}', '${severity}', ${val}, ${threshold},
-     '${metric} = ${val} (임계값: ${threshold})${detail:+ — ${detail}}')" 2>/dev/null \
+    (${DB_ID}, $(_q "$metric"), $(_q "$severity"), $(_n "$val"), $(_n "$threshold"),
+     $(_q "${metric} = ${val} (임계값: ${threshold})${detail:+ — ${detail}}"))" 2>/dev/null \
         && notify_alert FIRED "$NICK" "$severity" "$metric" "$val" "$threshold" "${detail}"
     return 0
 }
@@ -584,9 +631,13 @@ log "수집 데몬 시작 (DB_ID=${DB_ID})"
 trap 'log "수집 데몬 종료"; exit 0' SIGTERM SIGINT
 
 PURGE_LAST=0
+load_intervals
 
 while true; do
     NOW=$(date +%s)
+
+    # 수집 주기 캐시 갱신 (INTERVAL_CACHE_SEC 마다 1회 조회)
+    (( NOW - INTERVAL_LOADED >= INTERVAL_CACHE_SEC )) && load_intervals
 
     # 각 메트릭별 수집 주기 체크
     for metric in dashboard session statement vacuum object lock replication; do
